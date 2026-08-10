@@ -1,0 +1,9 @@
+pandas
+numpy
+openpyxl
+pillow
+torch
+torchvision
+faiss-cpu
+opencv-python
+scikit-learn

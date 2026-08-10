@@ -1,0 +1,18 @@
+# Data — tải qua Google Drive, xem link trong README.md
+images.zip
+images/
+*.xlsx
+test_images/
+output/
+materials/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
