@@ -8,9 +8,22 @@ toán OCR/đối chiếu chữ Nôm cổ.
 - **Phần 1 — Tìm top-k tương đồng character, so sánh với toàn bộ corpus**
   Dùng `search_all_chars_in_corpus.py` + `images.zip` (ảnh từng character) +
   `final_characteristics-v2.xlsx`.
-  Ý tưởng: trích xuất đặc trưng ảnh của từng ký tự bằng mạng ResNet18, sau đó dùng
+  Ý tưởng: trích xuất đặc trưng ảnh của từng ký tự, sau đó dùng
   [Faiss](https://github.com/facebookresearch/faiss) để tìm top-k vector tương đồng nhanh trên
   toàn bộ corpus.
+  Feature extractor có thể thay thế được (`feature_extractors.py`) — chọn qua `--backend`:
+
+  | backend | model | dim |
+  |---|---|---|
+  | `resnet18` | ResNet18 ImageNet (baseline gốc, giữ nguyên để so sánh) | 512 |
+  | `resnet18-gray` | ResNet18 nhưng `conv1` khởi tạo từ trọng số pretrained thay vì random | 512 |
+  | `chinese-clip` | [OFA-Sys/chinese-clip-vit-base-patch16](https://huggingface.co/OFA-Sys/chinese-clip-vit-base-patch16) | 512 |
+  | `dinov2` | [facebook/dinov2-base](https://huggingface.co/facebook/dinov2-base) | 1536 |
+
+- **So sánh các backend** — `benchmark_extractors.py`
+  Đo tốc độ + 3 chỉ số proxy chất lượng (`radical@k`, `stroke_mae@k`, `ids_jaccard@k`) suy ra từ
+  các cột `RADICAL` / `STROKE_NUM` / `SHAPE_MORPH` mà pipeline chính không dùng tới, cộng thêm
+  contact sheet ảnh (`output/contact_sheet_<backend>.png`) để đối chiếu bằng mắt.
 
 - **Phần 2 — Tìm top-k tương đồng character, so sánh trong nhóm cùng nghĩa "Quốc Ngữ"**
   Dùng `search_use_QuocNgu_mapping.py` + `images.zip` + `final_characteristics-v2.xlsx` +
@@ -42,17 +55,30 @@ pip install -r requirements.txt
 Sau khi tải dữ liệu từ Drive:
 1. Giải nén `images.zip` vào `./images/`
 2. Đặt `final_characteristics-v2.xlsx` và `QuocNgu_SinoNom_Dic.xlsx` ở thư mục gốc
-3. Tạo thư mục `./output/` (script không tự tạo)
+3. Tạo thư mục `./output/` (cần cho `search_use_QuocNgu_mapping.py`; script Phần 1 tự tạo)
+
+Lần chạy đầu, backend HuggingFace sẽ tự tải weights (~600 MB cho Chinese-CLIP, ~350 MB cho
+DINOv2) và cache vào `~/.cache/huggingface`.
 
 ## Chạy thử
 
 ```bash
-python search_all_chars_in_corpus.py
+# Phần 1 - chọn backend qua --backend
+python search_all_chars_in_corpus.py --backend chinese-clip
+python search_all_chars_in_corpus.py --backend resnet18       # baseline gốc
+python search_all_chars_in_corpus.py --backend dinov2 --limit 500   # chạy thử nhanh
+
+# So sánh các backend (chạy Phần 1 cho từng backend trước, embeddings được cache lại)
+python benchmark_extractors.py --backends resnet18 resnet18-gray chinese-clip dinov2
 
 # Phần 2: chỉnh input_text + test_image_path trong file trước khi chạy,
 # và cần có ảnh test trong ./test_images/
 python search_use_QuocNgu_mapping.py
 ```
+
+Lưu ý tốc độ (CPU 16 nhân, không GPU, batch 64): ResNet18 ~350-400 ảnh/s (chạy full 26k ảnh
+~1 phút), còn 2 backend ViT chỉ ~5-10 ảnh/s (~1 tiếng cho full corpus). Dùng `--limit` khi thử
+nghiệm, và chạy full ở chế độ nền.
 
 ## Tài liệu tham khảo
 

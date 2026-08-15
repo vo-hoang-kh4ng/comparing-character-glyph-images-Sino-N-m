@@ -1,17 +1,39 @@
+"""Corpus-wide top-K visual similarity search over Sino-Nom glyph images.
+
+For every character in ``final_characteristics-v2.xlsx`` that has an image in ``./images/``, this
+embeds the glyph, indexes all embeddings with Faiss (``IndexFlatIP`` == cosine similarity on
+L2-normalized vectors), and writes each character's top-K nearest neighbours.
+
+The feature extractor is pluggable -- see ``feature_extractors.py``. The original ResNet18
+pipeline is still the ``resnet18`` backend, so old results remain reproducible.
+
+Examples
+--------
+    python search_all_chars_in_corpus.py                          # default: chinese-clip
+    python search_all_chars_in_corpus.py --backend resnet18       # original baseline
+    python search_all_chars_in_corpus.py --backend dinov2 --limit 500   # quick trial run
+
+Embeddings are cached to ``output/embeddings_<backend>.npz`` and reused on later runs (pass
+``--refresh`` to recompute), which is what makes ``benchmark_extractors.py`` cheap to iterate on.
+"""
+
+import argparse
 import os
+import random
+import time
+import warnings
+
+import faiss
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
-from torchvision import models, transforms
-from PIL import Image
-import faiss
-from concurrent.futures import ThreadPoolExecutor
-import random
-import cv2
 
-import warnings
-warnings.filterwarnings("ignore") 
+from feature_extractors import BACKENDS, build_extractor
+
+warnings.filterwarnings("ignore")
+
+CHAR_TABLE = "final_characteristics-v2.xlsx"
+
 
 def set_deterministic(seed=42):
     random.seed(seed)
@@ -21,110 +43,115 @@ def set_deterministic(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-# Call this function at the beginning of your script
-set_deterministic()
 
-# Read mapping data
-df = pd.read_excel('final_characteristics-v2.xlsx')
-df_1 = df[['UNICODE', 'CHAR']].copy()
-char_dict = dict(zip(df_1['UNICODE'], df_1['CHAR']))
+def load_corpus(image_folder, limit=None):
+    """Return the (UNICODE, CHAR, image path) rows that actually have a glyph image on disk."""
+    df = pd.read_excel(CHAR_TABLE)[["UNICODE", "CHAR"]].copy()
+    df["path"] = df["UNICODE"].map(lambda u: os.path.join(image_folder, f"{u}.jpg"))
+    exists = df["path"].map(os.path.exists)
+    missing = int((~exists).sum())
+    df = df[exists].reset_index(drop=True)
+    if limit:
+        df = df.head(limit).copy()
+    print(f"Corpus: {len(df)} characters with images ({missing} entries have no image file)")
+    return df
 
-# Load pretrained ResNet18 and modify for grayscale images
-model = models.resnet18(pretrained=True)
-model.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)  # Modify to accept 1-channel (grayscale)
-model = nn.Sequential(*list(model.children())[:-1])  # Remove the classification head
-model.eval()
 
-# Preprocessing transforms with correct resizing and normalization
-preprocess = transforms.Compose([
-    transforms.Resize((100, 100), interpolation=cv2.INTER_LINEAR),  # Resize with linear interpolation
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.5], std=[0.5])  # Normalization as requested
-])
+def compute_embeddings(df, backend, batch_size, device, cache_path, refresh=False):
+    """Embed every glyph, caching the result keyed by the UNICODE list it was built from."""
+    if cache_path and os.path.exists(cache_path) and not refresh:
+        cached = np.load(cache_path, allow_pickle=True)
+        if list(cached["unicodes"]) == list(df["UNICODE"]):
+            print(f"Loaded cached embeddings from {cache_path}")
+            return cached["embeddings"], float(cached["elapsed"])
+        print(f"Cache {cache_path} does not match the current corpus -- recomputing")
 
-def extract_features(img_path):
-    img = Image.open(img_path).convert('L')  # Open as grayscale
-    img_tensor = preprocess(img).unsqueeze(0)  # Preprocess and add batch dimension
-    with torch.no_grad():
-        features = model(img_tensor).squeeze()  # Extract features
-    features = features / torch.norm(features)  # Normalize the feature vector
-    return features.numpy()
+    extractor = build_extractor(backend, device=device)
+    print(f"Embedding {len(df)} glyphs with '{backend}' (dim={extractor.dim}, batch={batch_size})")
+    start = time.perf_counter()
+    embeddings = extractor.embed_paths(
+        df["path"].tolist(), batch_size=batch_size, progress_every=20
+    )
+    elapsed = time.perf_counter() - start
+    print(f"Done in {elapsed:.1f}s ({len(df) / elapsed:.1f} img/s)")
 
-def process_image(unicode_value, image_folder):
-    img_path = os.path.join(image_folder, f"{unicode_value}.jpg")
-    if os.path.exists(img_path):
-        return unicode_value, extract_features(img_path)
-    else:
-        print(f"Not found {img_path}!")
-        return unicode_value, None
+    if cache_path:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        np.savez(
+            cache_path,
+            embeddings=embeddings,
+            unicodes=np.array(df["UNICODE"], dtype=object),
+            elapsed=elapsed,
+        )
+        print(f"Cached embeddings to {cache_path}")
+    return embeddings, elapsed
 
-def find_similar_images_faiss(image_folder, top_k=20):
-    output_data = []
-    feature_dict = {}
 
-    # Use ThreadPoolExecutor for parallel processing
-    with ThreadPoolExecutor() as executor:
-        results = list(executor.map(lambda unicode_value: process_image(unicode_value, image_folder), df_1['UNICODE']))
+def search_top_k(embeddings, top_k):
+    """Faiss inner-product search returning, per row, the top-K neighbours excluding self."""
+    index = faiss.IndexFlatIP(embeddings.shape[1])
+    index.add(embeddings)
+    # Ask for K+1 because a vector is always its own nearest neighbour.
+    scores, indices = index.search(embeddings, top_k + 1)
 
-    # Build feature dictionary
-    for unicode_value, feature_vector in results:
-        if feature_vector is not None:
-            feature_dict[unicode_value] = feature_vector
+    neighbour_idx = np.empty((len(embeddings), top_k), dtype=np.int64)
+    neighbour_score = np.empty((len(embeddings), top_k), dtype=np.float32)
+    for row in range(len(embeddings)):
+        # Dropping self leaves either K or K+1 hits (duplicate glyphs can outrank self), so
+        # slicing to top_k is always safe.
+        keep = indices[row] != row
+        neighbour_idx[row] = indices[row][keep][:top_k]
+        neighbour_score[row] = scores[row][keep][:top_k]
+    return neighbour_idx, neighbour_score
 
-    if not feature_dict:
-        print("No features extracted!")
-        return None
-
-    # Prepare feature matrix
-    feature_matrix = np.array(list(feature_dict.values()))
-    unicode_list = list(feature_dict.keys())
-
-    # Normalize all feature vectors (already normalized above, but this ensures consistency)
-    feature_matrix = feature_matrix / np.linalg.norm(feature_matrix, axis=1, keepdims=True)
-
-    # Use Faiss IndexFlatIP (Inner Product)
-    index = faiss.IndexFlatIP(feature_matrix.shape[1])  # Inner product as a proxy for cosine similarity
-    index.add(feature_matrix)  # Add all features to the Faiss index
-
-    for i, input_unicode in enumerate(unicode_list):
-        input_char = char_dict[input_unicode]
-        input_feature = feature_matrix[i].reshape(1, -1)  # Vector for the current character
-
-        # Search for the top K similar characters using Faiss (inner product is similar to cosine)
-        distances, indices = index.search(input_feature, top_k + 1)  # Search top K + 1 to exclude itself
-
-        similar_images = []
-        for idx, dist in zip(indices[0], distances[0]):
-            if idx != i:  # Exclude the character itself
-                similar_images.append((char_dict[unicode_list[idx]], dist))
-
-        # Take top 20 similar characters
-        top_10_similar = [char for char, _ in sorted(similar_images, key=lambda x: x[1], reverse=True)[:top_k]]
-
-        output_data.append({
-            'Input Character': input_char,
-            'Top 20 Similar Characters': top_10_similar
-        })
-
-    # Export results to a file
-    output_df = pd.DataFrame(output_data)
-    output_df.to_excel('./output/output_top_k_similar_char.xlsx', index=False)
-    output_df.to_csv('./output/output_top_k_similar_char.csv', index=False)
-
-    return output_df
-
-def load_config(config_path):
-    config = {}
-    with open(config_path, 'r') as file:
-        for line in file:
-            key, value = line.strip().split('=')
-            config[key] = float(value)
-    return config
 
 def main():
-    image_folder = './images'
-    result_df = find_similar_images_faiss(image_folder)
-    print(result_df)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--backend", default="chinese-clip", choices=BACKENDS,
+                        help="feature extractor to use (default: chinese-clip)")
+    parser.add_argument("--top-k", type=int, default=20, help="neighbours per character (default: 20)")
+    parser.add_argument("--images", default="./images", help="folder of <UNICODE>.jpg glyphs")
+    parser.add_argument("--output-dir", default="./output", help="where results are written")
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--device", default="cpu", help="'cpu' or 'cuda'")
+    parser.add_argument("--limit", type=int, default=None, help="only process the first N characters")
+    parser.add_argument("--refresh", action="store_true", help="ignore cached embeddings")
+    args = parser.parse_args()
+
+    set_deterministic()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    df = load_corpus(args.images, limit=args.limit)
+    if df.empty:
+        raise SystemExit(f"No glyph images found under {args.images!r} -- extract images.zip first.")
+
+    tag = args.backend + (f"_limit{args.limit}" if args.limit else "")
+    cache_path = os.path.join(args.output_dir, f"embeddings_{tag}.npz")
+    embeddings, _ = compute_embeddings(
+        df, args.backend, args.batch_size, args.device, cache_path, refresh=args.refresh
+    )
+
+    top_k = min(args.top_k, len(df) - 1)
+    neighbour_idx, neighbour_score = search_top_k(embeddings, top_k)
+
+    chars = df["CHAR"].to_numpy()
+    output_df = pd.DataFrame(
+        {
+            "Input Character": chars,
+            f"Top {top_k} Similar Characters": [list(chars[row]) for row in neighbour_idx],
+            "Similarity Scores": [
+                [round(float(s), 4) for s in row] for row in neighbour_score
+            ],
+        }
+    )
+
+    xlsx_path = os.path.join(args.output_dir, f"output_top_k_similar_char_{tag}.xlsx")
+    csv_path = os.path.join(args.output_dir, f"output_top_k_similar_char_{tag}.csv")
+    output_df.to_excel(xlsx_path, index=False)
+    output_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    print(f"Wrote {xlsx_path}\nWrote {csv_path}")
+    return output_df
+
 
 if __name__ == "__main__":
     main()

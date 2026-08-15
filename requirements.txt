@@ -4,6 +4,7 @@ openpyxl
 pillow
 torch
 torchvision
+transformers
 faiss-cpu
 opencv-python
 scikit-learn
