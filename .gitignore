@@ -3,7 +3,13 @@ images.zip
 images/
 *.xlsx
 test_images/
-output/
+output/*
+# Nhãn Phần 2 do người gán tay — KHÔNG sinh lại được bằng cách chạy lại code,
+# nên phải theo dõi. Mọi thứ còn lại trong output/ (cache .npz, ảnh render,
+# contact sheet) đều tái tạo được và vẫn bị bỏ qua.
+!output/label_sheets/
+output/label_sheets/*
+!output/label_sheets/label_template.csv
 materials/
 
 # Python
@@ -16,3 +22,5 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+test_images-*.zip
+fonts/

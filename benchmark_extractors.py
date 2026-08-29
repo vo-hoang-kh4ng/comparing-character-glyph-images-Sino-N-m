@@ -38,8 +38,14 @@ import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw
 
-from feature_extractors import BACKENDS
-from search_all_chars_in_corpus import CHAR_TABLE, load_corpus, search_top_k, set_deterministic
+from feature_extractors import BACKENDS, DTYPES
+from search_all_chars_in_corpus import (
+    CHAR_TABLE,
+    cache_tag,
+    load_corpus,
+    search_top_k,
+    set_deterministic,
+)
 
 #: Ideographic Description Characters -- structural operators in SHAPE_MORPH, not components.
 IDS_OPERATORS = set("⿰⿱⿲⿳⿴⿵⿶⿷⿸⿹⿺⿻")
@@ -149,10 +155,19 @@ def main():
     summary, neighbours_by_backend, sample_tables = [], {}, {}
 
     for backend in args.backends:
-        cache_path = os.path.join(args.output_dir, f"embeddings_{backend}{suffix}.npz")
-        if not os.path.exists(cache_path):
-            print(f"[skip] {backend}: no cache at {cache_path} -- run search_all_chars_in_corpus.py first")
+        # Backends were not all embedded at the same precision (the large ViTs need fp16 to fit),
+        # so accept whichever cache exists rather than forcing one dtype across the comparison.
+        found = [
+            (dt, os.path.join(args.output_dir, f"embeddings_{cache_tag(backend, dt, args.limit)}.npz"))
+            for dt in sorted(DTYPES)
+        ]
+        found = [(dt, path) for dt, path in found if os.path.exists(path)]
+        if not found:
+            print(f"[skip] {backend}: no cache in {args.output_dir} -- run search_all_chars_in_corpus.py first")
             continue
+        dtype, cache_path = found[0]
+        if len(found) > 1:
+            print(f"[note] {backend}: caches for {[d for d, _ in found]} exist, using {dtype}")
         cached = np.load(cache_path, allow_pickle=True)
         embeddings = cached["embeddings"]
         elapsed = float(cached["elapsed"])
@@ -163,12 +178,13 @@ def main():
         metrics = quality_metrics(neighbour_idx, radicals, strokes, components)
         summary.append({
             "backend": backend,
+            "dtype": dtype,
             "dim": int(embeddings.shape[1]),
             "embed_seconds": round(elapsed, 1),
             "img_per_sec": round(len(df) / elapsed, 1),
             **{k: round(v, 4) for k, v in metrics.items()},
         })
-        print(f"{backend:14s} dim={embeddings.shape[1]:5d} {len(df)/elapsed:6.1f} img/s  " +
+        print(f"{backend:20s} {dtype:4s} dim={embeddings.shape[1]:5d} {len(df)/elapsed:6.1f} img/s  " +
               "  ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
 
         chars = df["CHAR"].to_numpy()

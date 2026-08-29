@@ -25,12 +25,37 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-BACKENDS = ("resnet18", "resnet18-gray", "chinese-clip", "dinov2")
+BACKENDS = (
+    "resnet18",
+    "resnet18-gray",
+    "chinese-clip",
+    "chinese-clip-large",
+    "chinese-clip-huge",
+    "dinov2",
+)
 
 _HF_MODEL_IDS = {
     "chinese-clip": "OFA-Sys/chinese-clip-vit-base-patch16",
+    "chinese-clip-large": "OFA-Sys/chinese-clip-vit-large-patch14",
+    "chinese-clip-huge": "OFA-Sys/chinese-clip-vit-huge-patch14",
     "dinov2": "facebook/dinov2-base",
 }
+
+#: ``--dtype`` values. fp16 halves weight memory, which is what makes ViT-H fit alongside the vLLM
+#: workers; it only affects the HuggingFace backends (the ResNets are cheap enough to leave alone).
+DTYPES = {"fp32": torch.float32, "fp16": torch.float16}
+
+
+def _from_pretrained(cls, model_id, dtype):
+    """``from_pretrained`` with the dtype kwarg that this transformers version actually accepts.
+
+    transformers renamed ``torch_dtype`` to ``dtype`` around 4.56 and warns on the old name; the
+    old name is still the only one that works on earlier v4 releases.
+    """
+    try:
+        return cls.from_pretrained(model_id, dtype=dtype)
+    except TypeError:
+        return cls.from_pretrained(model_id, torch_dtype=dtype)
 
 
 def _l2_normalize(matrix):
@@ -109,29 +134,50 @@ class ResNet18Extractor(BaseExtractor):
 
 
 class ChineseClipExtractor(BaseExtractor):
-    """Image tower of Chinese-CLIP, using the projected image embedding (512-d)."""
+    """Image tower of Chinese-CLIP, using the projected image embedding.
 
-    name = "chinese-clip"
+    Serves every ``chinese-clip*`` backend; the size comes from the model id, and the embedding
+    width is read off the config (base 512, large 768, huge 1024) rather than hardcoded.
+    """
+
     image_mode = "RGB"
 
-    def __init__(self, device="cpu"):
+    def __init__(self, backend="chinese-clip", device="cpu", dtype="fp32"):
         from transformers import AutoImageProcessor, ChineseCLIPModel
 
-        model_id = _HF_MODEL_IDS["chinese-clip"]
+        model_id = _HF_MODEL_IDS[backend]
+        self.name = backend
         self.device = torch.device(device)
-        self.processor = AutoImageProcessor.from_pretrained(model_id)
-        self.model = ChineseCLIPModel.from_pretrained(model_id).to(self.device).eval()
+        self.dtype = DTYPES[dtype]
+        # Deliberately the *slow* (PIL) processor -- see the use_fast note in CLAUDE.md. The fast
+        # torchvision path benchmarks faster in isolation but is single-threaded-stable here,
+        # whereas fast contends for CPU with the vLLM workers and its throughput swings ~2x.
+        self.processor = AutoImageProcessor.from_pretrained(model_id, use_fast=False)
+
+        model = _from_pretrained(ChineseCLIPModel, model_id, self.dtype)
+        # ``get_image_features`` only touches vision_model + visual_projection. The text tower is a
+        # full RoBERTa that would otherwise be copied to the GPU and never used -- ~1.3 GB wasted on
+        # ViT-H. Drop it while the model is still on CPU so only the vision half is transferred.
+        del model.text_model, model.text_projection
+        self.model = model.to(self.device).eval()
         self.dim = self.model.config.projection_dim
 
     @torch.no_grad()
     def _forward(self, images):
-        inputs = self.processor(images=images, return_tensors="pt").to(self.device)
+        inputs = self.processor(images=images, return_tensors="pt")
+        # pixel_values must match the weight dtype under fp16; any integer tensors must not be cast.
+        inputs = {
+            key: value.to(self.device, dtype=self.dtype)
+            if value.is_floating_point()
+            else value.to(self.device)
+            for key, value in inputs.items()
+        }
         features = self.model.get_image_features(**inputs)
         # transformers <5 returns the projected tensor directly; >=5 wraps it in an output object
         # whose ``pooler_output`` holds that same projection.
         if not torch.is_tensor(features):
             features = features.pooler_output
-        return features.cpu().numpy()
+        return features.float().cpu().numpy()
 
 
 class Dinov2Extractor(BaseExtractor):
@@ -145,31 +191,43 @@ class Dinov2Extractor(BaseExtractor):
     name = "dinov2"
     image_mode = "RGB"
 
-    def __init__(self, device="cpu"):
+    def __init__(self, device="cpu", dtype="fp32"):
         from transformers import AutoImageProcessor, AutoModel
 
         model_id = _HF_MODEL_IDS["dinov2"]
         self.device = torch.device(device)
-        self.processor = AutoImageProcessor.from_pretrained(model_id)
-        self.model = AutoModel.from_pretrained(model_id).to(self.device).eval()
+        self.dtype = DTYPES[dtype]
+        # See the note in ChineseClipExtractor -- slow processor is the deliberate choice.
+        self.processor = AutoImageProcessor.from_pretrained(model_id, use_fast=False)
+        self.model = _from_pretrained(AutoModel, model_id, self.dtype).to(self.device).eval()
         self.dim = self.model.config.hidden_size * 2
 
     @torch.no_grad()
     def _forward(self, images):
-        inputs = self.processor(images=images, return_tensors="pt").to(self.device)
+        inputs = self.processor(images=images, return_tensors="pt")
+        inputs = {
+            key: value.to(self.device, dtype=self.dtype)
+            if value.is_floating_point()
+            else value.to(self.device)
+            for key, value in inputs.items()
+        }
         hidden = self.model(**inputs).last_hidden_state  # (B, 1 + n_patches, H)
         pooled = torch.cat([hidden[:, 0], hidden[:, 1:].mean(dim=1)], dim=1)
-        return pooled.cpu().numpy()
+        return pooled.float().cpu().numpy()
 
 
-def build_extractor(backend, device="cpu"):
-    """Instantiate a backend by name. See ``BACKENDS`` for valid values."""
+def build_extractor(backend, device="cpu", dtype="fp32"):
+    """Instantiate a backend by name. See ``BACKENDS`` for valid values.
+
+    ``dtype`` applies to the HuggingFace backends only; the ResNets always run in fp32 because they
+    are fast enough that halving them buys nothing.
+    """
     if backend == "resnet18":
         return ResNet18Extractor(faithful=True, device=device)
     if backend == "resnet18-gray":
         return ResNet18Extractor(faithful=False, device=device)
-    if backend == "chinese-clip":
-        return ChineseClipExtractor(device=device)
+    if backend.startswith("chinese-clip"):
+        return ChineseClipExtractor(backend, device=device, dtype=dtype)
     if backend == "dinov2":
-        return Dinov2Extractor(device=device)
+        return Dinov2Extractor(device=device, dtype=dtype)
     raise ValueError(f"Unknown backend {backend!r}; expected one of {BACKENDS}")
