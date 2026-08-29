@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from feature_extractors import BACKENDS, build_extractor
+from feature_extractors import BACKENDS, DTYPES, build_extractor
 
 warnings.filterwarnings("ignore")
 
@@ -44,6 +44,16 @@ def set_deterministic(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
+def cache_tag(backend, dtype="fp32", limit=None):
+    """Filename stem shared by the embedding cache and the result files.
+
+    fp32 and no-limit stay unsuffixed so the original filenames keep working.
+    ``benchmark_extractors.py`` builds the same tag to find the caches.
+    """
+    tag = backend + (f"_{dtype}" if dtype != "fp32" else "")
+    return tag + (f"_limit{limit}" if limit else "")
+
+
 def load_corpus(image_folder, limit=None):
     """Return the (UNICODE, CHAR, image path) rows that actually have a glyph image on disk."""
     df = pd.read_excel(CHAR_TABLE)[["UNICODE", "CHAR"]].copy()
@@ -57,7 +67,7 @@ def load_corpus(image_folder, limit=None):
     return df
 
 
-def compute_embeddings(df, backend, batch_size, device, cache_path, refresh=False):
+def compute_embeddings(df, backend, batch_size, device, cache_path, refresh=False, dtype="fp32"):
     """Embed every glyph, caching the result keyed by the UNICODE list it was built from."""
     if cache_path and os.path.exists(cache_path) and not refresh:
         cached = np.load(cache_path, allow_pickle=True)
@@ -66,7 +76,7 @@ def compute_embeddings(df, backend, batch_size, device, cache_path, refresh=Fals
             return cached["embeddings"], float(cached["elapsed"])
         print(f"Cache {cache_path} does not match the current corpus -- recomputing")
 
-    extractor = build_extractor(backend, device=device)
+    extractor = build_extractor(backend, device=device, dtype=dtype)
     print(f"Embedding {len(df)} glyphs with '{backend}' (dim={extractor.dim}, batch={batch_size})")
     start = time.perf_counter()
     embeddings = extractor.embed_paths(
@@ -114,6 +124,8 @@ def main():
     parser.add_argument("--output-dir", default="./output", help="where results are written")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", default="cpu", help="'cpu' or 'cuda'")
+    parser.add_argument("--dtype", default="fp32", choices=sorted(DTYPES),
+                        help="weight precision for the HuggingFace backends (default: fp32)")
     parser.add_argument("--limit", type=int, default=None, help="only process the first N characters")
     parser.add_argument("--refresh", action="store_true", help="ignore cached embeddings")
     args = parser.parse_args()
@@ -125,10 +137,11 @@ def main():
     if df.empty:
         raise SystemExit(f"No glyph images found under {args.images!r} -- extract images.zip first.")
 
-    tag = args.backend + (f"_limit{args.limit}" if args.limit else "")
+    tag = cache_tag(args.backend, args.dtype, args.limit)
     cache_path = os.path.join(args.output_dir, f"embeddings_{tag}.npz")
     embeddings, _ = compute_embeddings(
-        df, args.backend, args.batch_size, args.device, cache_path, refresh=args.refresh
+        df, args.backend, args.batch_size, args.device, cache_path,
+        refresh=args.refresh, dtype=args.dtype,
     )
 
     top_k = min(args.top_k, len(df) - 1)

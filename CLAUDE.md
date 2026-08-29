@@ -51,19 +51,38 @@ engine); don't add unnecessary preprocessing.
 
 ### `feature_extractors.py` — pluggable embedding backends
 
-All backends share one contract: `build_extractor(name).embed_paths(paths) -> (N, D) float32`,
-L2-normalized so inner product == cosine similarity (what the Faiss `IndexFlatIP` downstream
-assumes). Backends:
+All backends share one contract:
+`build_extractor(name, device, dtype).embed_paths(paths) -> (N, D) float32`, L2-normalized so inner
+product == cosine similarity (what the Faiss `IndexFlatIP` downstream assumes). Backends:
 
 | name | model | dim | notes |
 |---|---|---|---|
 | `resnet18` | ImageNet ResNet18 | 512 | **Original baseline, kept bit-for-bit.** Patching `conv1` to 1 channel *discards* the pretrained first-layer filters and re-initializes them randomly — everything downstream is built on a random edge detector. This is the flaw the other backends fix; keep it faithful so "before" numbers stay honest. |
 | `resnet18-gray` | ImageNet ResNet18 | 512 | Same net, but `conv1` is seeded by summing the pretrained RGB filters, so the ImageNet prior survives. Isolates how much of the baseline's weakness is that one line. |
 | `chinese-clip` | OFA-Sys/chinese-clip-vit-base-patch16 | 512 | Image tower, projected embedding (`get_image_features`). Pretrained on Chinese image–text pairs, so its prior is closest to Han glyphs. |
+| **`chinese-clip-large`** | OFA-Sys/chinese-clip-vit-large-patch14 | 768 | **Best quality measured so far.** Same family as base, so base→large→huge isolates the effect of scale alone. |
+| `chinese-clip-huge` | OFA-Sys/chinese-clip-vit-huge-patch14 | 1024 | Bigger than large but *not* better on radical@k — see the saturation note in the results. |
 | `dinov2` | facebook/dinov2-base | 1536 | CLS token ⊕ mean-pooled patch tokens — CLS carries global shape, patch mean carries stroke texture. |
 
-`transformers` v5 returns an output object from `get_image_features` (the projection lives in
-`pooler_output`) while v4 returned the tensor directly; `ChineseClipExtractor` handles both.
+The three `chinese-clip*` backends all run through one `ChineseClipExtractor`; the embedding width
+is read from `config.projection_dim`, never hardcoded, so adding another size is a one-line entry in
+`_HF_MODEL_IDS` plus `BACKENDS`.
+
+Two memory tricks make the large models fit next to the vLLM workers, both in
+`ChineseClipExtractor.__init__`:
+
+- **The text tower is deleted before the model moves to the GPU.** `get_image_features` only uses
+  `vision_model` + `visual_projection`, but `ChineseCLIPModel` also loads a full RoBERTa — ~1.3 GB
+  of pure waste on ViT-H. `del model.text_model, model.text_projection` while still on CPU means
+  only the vision half is ever transferred. Do not "restore" these; nothing calls them.
+- **`--dtype fp16`** halves the weights. Validated, not assumed: fp16 vs fp32 on `chinese-clip`
+  agrees to cosine ≥ 0.99999 with **99.31%** top-20 overlap, so the comparison stays fair. ViT-H
+  needs it (fp32 would be ~3.8 GB against ~3.05 GB free).
+
+Version handling: `transformers` v5 returns an output object from `get_image_features` (the
+projection lives in `pooler_output`) while v4 returned the tensor directly, and the `torch_dtype`
+kwarg was renamed to `dtype` around 4.56. `ChineseClipExtractor` and `_from_pretrained` handle both
+splits.
 
 ### `search_all_chars_in_corpus.py` — corpus-wide top-K similarity
 
@@ -79,10 +98,13 @@ CLI (no more editing constants): `--backend` (default `chinese-clip`), `--top-k`
 `--output-dir`, `--batch-size`, `--device`, `--limit N` (quick trial on the first N chars),
 `--refresh` (ignore cache).
 
-Embeddings are cached to `output/embeddings_<backend>.npz`, keyed by the UNICODE list they were
-built from, and reused across runs — this is what makes `benchmark_extractors.py` cheap. Output
-goes to `output/output_top_k_similar_char_<backend>.xlsx`/`.csv` (columns: `Input Character`,
-`Top K Similar Characters`, `Similarity Scores`). `./output/` is now created automatically.
+Embeddings are cached to `output/embeddings_<tag>.npz`, keyed by the UNICODE list they were built
+from, and reused across runs — this is what makes `benchmark_extractors.py` cheap. The `<tag>` is
+the backend name, plus a `_limit<N>` suffix when `--limit` is passed, so trial runs never clobber
+the full-corpus cache (and `benchmark_extractors.py` must be given the *same* `--limit` to find
+them). Output goes to `output/output_top_k_similar_char_<tag>.xlsx`/`.csv` — columns are
+`Input Character`, `Top <k> Similar Characters` (the k is interpolated into the header, so it is
+`Top 20 …` by default), and `Similarity Scores`. `./output/` is created automatically.
 
 Note: 26,044 of the 31,208 table rows have a glyph image; the other 5,164 are skipped silently
 (count is reported, not one line per miss).
@@ -101,26 +123,216 @@ itself never uses:
 
 These are cheap stand-ins that correlate with "looks alike", adequate for *ranking backends against
 each other* — they are not human relevance judgements, and the full evaluation is a separate work
-item. Also emits pairwise top-K overlap between backends, and `contact_sheet_<backend>.png`
-(query glyph in a red box + its top-5 neighbours) for eyeballing.
+item.
+
+Writes `output/benchmark_summary.xlsx` with three sheets — `Metrics` (per-backend speed + proxies),
+`Agreement` (mean pairwise top-K overlap, i.e. how differently two backends rank the corpus), and
+`Samples` (top-10 neighbour strings for 25 seeded-random query characters) — plus
+`contact_sheet_<backend>.png` (query glyph in a red box + its top-5 neighbours) for eyeballing.
+A backend with no cache file is skipped with a message, not an error; only an empty run aborts.
+
+### `benchmark_search.py` — is exact Faiss worth replacing?
+
+Compares `IndexFlatIP` against HNSW / IVFFlat / IVFPQ. Reads the embedding caches, so it is nearly
+free to re-run. Deliberately separates two kinds of number: **recall** only from real embeddings
+(it depends on how vectors are distributed), **latency** from real data up to 26k and then random
+vectors for 100k–1M (timing barely depends on the data). Do not merge the two. Conclusion is in the
+Faiss section below — the short version is *keep the exact index*.
+
+### `analyze_metric_ceiling.py` — is `radical@k` saturating, or is the *label*?
+
+Written to answer feedback that the numbers "plateau at 0.5". Three stages, three hypotheses:
+
+- `--stage ceiling` — the theoretical ceiling of `radical@k` from the radical-group size
+  distribution. It is **0.9862** at k=20, and only 3% of queries are capped at all, so a too-small
+  top-K is *not* the bottleneck.
+- `--stage curve` — `radical@k` for k=1…100 per backend. `chinese-clip-large` gets **0.6331 at
+  k=1**, decaying gently to 0.5361 at k=20. The bottleneck is at rank 1; widening or narrowing k
+  cannot fix it.
+- `--stage oracle` — the ceiling that actually matters. Ranking by Jaccard over the *true* IDS
+  components (a ranker that already knows the character's structure, which no image model can beat)
+  scores only **0.7338**. `RADICAL` is not a purely visual label: the radical appears in the
+  character's own IDS decomposition just **56.7%** of the time.
+
+So `chinese-clip-large` sits at **73% of the achievable ceiling** and **24.4× random** (0.0220) —
+headroom is ~+37% relative, not 2×. Full write-up in BENCHMARK.md §9, including why the
+large→huge regression is evidence for the *pretraining-domain* hypothesis rather than a capacity
+one, and the circularity trap to avoid when fine-tuning (never train on `RADICAL` and then report
+`radical@k`).
+
+Needs `scipy` (sparse component matrix); the oracle stage is O(N²) in chunks, ~2 min for 26k.
+
+### `render_fonts.py` — synthesising positive pairs for fine-tuning
+
+The corpus has **exactly one image per character** (26,044 images / 26,044 characters), so *no*
+"same character, different style" pair exists anywhere in the data — and that is precisely the pair
+metric learning needs. This script manufactures them by re-rendering every character from its
+Unicode codepoint through 7 typefaces (mincho, song, **kai/brush**, hei, fangsong).
+
+Two things that matter if you touch it:
+
+- **Fonts are not installed on this machine** (`fc-list :lang=zh` = 0) and are not committed
+  (~200 MB, `fonts/` is gitignored). Run `bash download_fonts.sh` first. `FONT_GROUPS` maps a style
+  tag to an ordered *fallback list* — `hanamin` is HanaMinA (BMP) then HanaMinB (Ext-B), because
+  neither alone covers the corpus.
+- **Coverage is checked against the font's `cmap`, never assumed.** A codepoint the font lacks
+  renders as a `.notdef` tofu box — identical for every missing character — which would poison the
+  positive pairs. Characters outside the cmap are skipped, and a blank render is dropped too.
+
+Union coverage is 26,033/26,044 = **100.0%** (11 characters no font can draw), averaging 5.05
+typefaces per character → 131,604 rendered images. Output is `output/rendered/<tag>/<UNICODE>.png`
+plus `manifest.csv`, where the class label is the Unicode codepoint and the original corpus image is
+listed as one more view (`view=corpus`).
+
+**Measured, and the number is the point:** with the current `chinese-clip-large`, rendered glyphs
+retrieve their own character at hit@1 = 0.7018 — but real scans manage 0.0847 (BENCHMARK.md §10.2).
+The hardest font is `lxgw-kai`, the most brush-like one, at 0.6350, so the data does span the right
+axis; it is just an order of magnitude easier than the real failure. `--augment N` runs each render
+through `scan_augment.degrade` (below), which pulls hit@1 down to 0.1986 — within 2.8x of the real
+scans instead of 9.4x. **Do not present multi-font rendering alone as having closed the handwriting
+gap** — see BENCHMARK.md §13.3-§13.5.
+
+### `scan_augment.py` — degrading renders to match real scans, calibrated against measurements
+
+The gap between a clean render and a real scan is not font choice, and it is not guesswork: six
+statistics measured over the 59 `test_images/` scans say where it is. Blur is the largest
+(`edge` 15.6 vs 102.2, a 6.55x gap), then contrast (91.6 vs 232.8), stroke thickness (0.051 vs
+0.028), ink fill, and sensor noise (10.1 vs 2.7).
+
+`degrade()` reproduces those six axes in the physical order a scanned page acquires them: elastic
+warp → stroke dilation → downsample/upsample (this is what makes adjacent strokes *merge*) →
+Gaussian blur → paper tint and contrast reduction → sensor noise → non-square stretch. Nothing here
+touches radical structure, so the Unicode label stays valid.
+
+**The parameter ranges are calibrated, not tuned by eye.** `python scan_augment.py --calibrate`
+prints the scan/render/degraded comparison and a mean log-error: currently 0.880 → 0.103 (8.5x
+better), with all six statistics landing within 0.77-1.00x of the real scans. If you change a
+constant in `degrade()`, re-run `--calibrate`; do not adjust them by feel.
+
+The residual 2.8x difficulty gap is not fixable here. Every operation in `degrade()` is *image
+noise*; real scans are additionally written with a brush in running script — merged strokes, shifted
+component proportions, dropped strokes. That is a *structural* difference no image-processing
+pipeline can synthesise from printed type. Closing it needs real brush data (MCCD) or real Hán-Nôm
+scans (NomNaOCR / IHR-NomDB).
+
+### `evaluate_test_images.py` — the only non-proxy evaluation in the project
+
+`test_images/` filenames are Telex-typed Vietnamese (`cofn.jpg` = "còn", `nguwowsi.jpg` = "người"),
+so decoding them and looking the word up in `QuocNgu_SinoNom_Dic.xlsx` yields **real ground truth**:
+the set of Sino-Nôm characters that actually read that way. Telex allows the tone letter directly
+after the vowel (`cofn`) or at the end (`conf`), so the decoder generates every tone position and
+matches — **59/59 filenames resolve, none ambiguously**.
+
+This was 56/59 until the three stragglers were traced. Only one was a data problem: `phong_1` was a
+**code bug** — `decode_filenames` called `words.pop()` on the set living inside `lookup`, so after
+`phong.jpg` matched, `lookup["phong"]` was empty and the *second* image of any repeated word was
+silently dropped (now `next(iter(words))`). The other two are filename typos, corrected via
+`FILENAME_FIXES` rather than by renaming files, so `test_images/` still matches the original zip
+byte-for-byte: `dau` → "dâu" (Kiều's "bể dâu", distinct from `ddau.jpg` = "đau"), `nguwowsi` →
+"người" (typed `s` for `f`).
+
+**Part 1, whole-corpus retrieval on real scans: hit@1 = 0.0847, hit@20 = 0.2034, MRR = 0.1143**
+(n=59, `chinese-clip-large`/fp16). That is 179× the random baseline but low in absolute terms — and
+much worse than the proxy metrics suggest. Report it honestly; it is the project's first real number.
+
+The cause is **distribution shift, not a weak model.** Symptom: a hub effect — 攅 is returned top-1
+for 6 different queries, 劕/湸/旦/刟 for 3 each. Measured gaps: ink fill 0.353 vs 0.184, background
+249 vs 255, and the scans are **not square** (96×128, 88×96) while every corpus image is 70×70, so a
+straight resize to 224×224 distorts the glyph. But the dominant gap is only visible by eye: **the
+queries are handwritten/cursive, the corpus is printed regular script.** `moojt.jpg` is a flowing
+沒; its nine candidates are all upright 楷書.
+
+`--normalize` (ink-tight crop → square pad → fixed fill ratio) fixes the *geometric* half. It cuts
+the hub effect clearly (41 → 48 distinct top-1s) but the hit@k change is **inside the noise at
+n=59** — 5 images vs 6, a one-image difference. So it is **off by default**; do not promote it to a
+default on this evidence.
+
+Part 2 on the same scans works far better, because it ranks ~7 candidates instead of 26,044. It also
+widens the gap to the histogram: the two methods agree on top-1 only **23/59 (39.0%)**, versus 6/10
+on clean corpus queries. Histogram scores collapse into a 0.003 band across a whole candidate group.
+
+**Part 2 is now labelled.** `output/label_sheets/label_template.csv` carries `correct_index`,
+`correct_unicode` and a `confidence` column for all 59 scans (53 `high`, 4 `med`, 2 `low`). The
+scans are the opening lines of *Truyện Kiều*, so labels were assigned by shape matching first and
+cross-checked against the poem's standard Nôm orthography — where the two disagreed the **image
+won** (the scan writes "qua" as 戈 not 過, "năm" as 𢆥 not 年, "một" as 没 not 𠬠).
+
+Measured: embedding 28/59 = **0.4746**, histogram 26/59 = 0.4407, random-in-group 0.1987. Both beat
+random by >2x, so Part 2 genuinely works. All three newly recovered scans are missed by *both*
+methods, so they only grew the denominator.
+
+**The 11 `med`/`low` rows were re-reviewed** (BENCHMARK.md §10.6.1) by re-cropping the deciding half
+of each 94×104-to-178×162 scan at 460–520px. Five rows rose to `high`, `gia` dropped to `low`, and
+**one label was wrong**: `coix` was 揆 (扌) but the left radical is 土 → 𡎝, which is also the standard
+Kiều spelling. That single fix cost embedding one image and gave histogram one — 29/25 became 28/26,
+halving the gap from 4 images to 2. Treat that as the calibration for how much weight the table can
+carry. `trari` and `gia` remain unresolved and need the original page scan, not the isolated glyph.
+
+**`confidence` is a human judgement, not a score.** Nothing computes it — deliberately. The
+sensitivity check below filters on this column and then re-scores the model; if `confidence` were
+derived from the model's similarity the check would be circular. The rubric lives in
+`CONFIDENCE_LEVELS` in `evaluate_test_images.py`: `high` = the deciding stroke is readable and every
+rival candidate differs by radical or by a clearly visible stroke count; `med` = one or more rivals
+are near-identical variants differing only where the scan is blurred (𣘛 vs 橷, both 木+兜); `low` =
+the deciding stroke is unreadable and the pick leans on context. When shape and the poem disagree
+the shape wins **and** the row drops to `med`. Filter with `--min-confidence high`.
+
+**The sheet used to hide the answer (fixed).** `label_sheets()` defaulted to `max_candidates=24`
+while `n_candidates` reported the true total, so `gia` listed 50 candidates, printed 24, and had its
+answer at index **32**. Same for `lujc` (35/40), `phong` (30/35), `tuw` (27/97) — the labeller could
+not see the right answer on the sheet. The labels themselves are fine (assigned off the full list,
+and the scorer always used an untruncated `sorted(gt)`; all 59 rows re-verified index↔unicode), but
+the sheets were unusable. Now `max_candidates=None` and each candidate carries its codepoint
+(`32=笳(7B33)`). Do not set it back.
+
+**Do not cite that gap as evidence that embeddings beat the histogram.** The 95% CIs overlap almost
+entirely and the whole margin is **2 images out of 59**. Restricting to the 53 `high`-confidence
+labels keeps it at exactly 2 (0.5094 vs 0.4717, MRR 0.6808 vs 0.6402). With a ±13-point CI on each
+side, 2 images is not evidence. What the number does establish is that narrowing to the same-reading
+group is what makes the task tractable, not the choice of scoring function.
+
+**59 is the hard ceiling of this test set.** `test_images/` holds 59 scans and the repo has no other
+source of real scanned glyphs. At n=59 around p≈0.5 the 95% CI is **±13.3 points**; ±8 points needs
+n≈150, ±6 points needs n≈300. Any improvement smaller than ~15 points — which almost certainly
+includes finetuning — **cannot be demonstrated on this data.** Growing n requires new scans, not new
+methods.
+
+Labels came from shape matching, not from a Hán-Nôm philologist; the 6 remaining `med`/`low` rows
+(`coix`, `dau`, `gia`, `moojt`, `trari`, `xanh`) should be reviewed by someone who reads Nôm. Also
+note `test_images/` holds isolated glyphs with no line numbers, so "cross-checking against Kiều" is
+inference from the vocabulary of the opening lines, not a lookup. Re-run with
+`--part 2 --labels output/label_sheets/label_template.csv [--min-confidence high]`.
 
 ### `search_use_QuocNgu_mapping.py` — same-reading top-K similarity
 
-Given a single Vietnamese word (`input_text`, hardcoded near the top of the file — several examples
-are present as commented-out alternatives) and a corresponding test image (`test_image_path`),
-finds the top-10 most similar characters *only among characters that share that Quốc Ngữ reading*
-(looked up via `QuocNgu_SinoNom_Dic.xlsx`, then mapped to `UNICODE` via `final_characteristics-v2.xlsx`).
+Ranks only the characters sharing one Quốc Ngữ reading (looked up via `QuocNgu_SinoNom_Dic.xlsx`,
+then mapped to `UNICODE` via `final_characteristics-v2.xlsx`). The candidate set is a few dozen
+characters, so there is no Faiss index — a plain sort is enough.
 
-Pipeline is deliberately simpler than the other script (per README.txt: comparison set is small, so
-no Faiss index is used — plain sort is enough): grayscale → resize 100x100 → Gaussian blur → Canny
-edge detection → Otsu binary threshold → contrast stretch → 256-bin histogram → L2 distance between
-histograms converted to a similarity score (`1 / (1 + distance)`).
+Two scoring methods via `--method`:
 
-To run for a different word: edit `input_text` and `test_image_path` at the top of the file (there
-is no CLI argument parsing), and ensure the referenced image exists under `./test_images/`.
+- **`embedding`** (default) — the same `feature_extractors.py` backends Part 1 uses, scored by
+  cosine. Candidate glyphs are a subset of the corpus, so it **reads their vectors straight out of
+  `output/embeddings_<backend>.npz`** and only runs a forward pass for the query image.
+- **`histogram`** — the original Canny + 256-bin histogram pipeline, kept bit-for-bit.
+- **`both`** — runs the two and prints their top-K agreement.
 
-Output: `./output/output_histogram_similarity.xlsx` and `.csv` (columns: `UNICODE`, `SinoNom`,
-`Similarity`). Same caveat — `./output/` must exist first.
+**Use `embedding`; `histogram` is kept for comparison, not for results.** The histogram only counts
+*edge pixels*, so it cannot tell apart two characters that carry a similar amount of ink: querying
+with the image of 咱 makes it return 些 at similarity **1.0000**, ranked above the query character
+itself. Measured, on a self-retrieval test (query with a candidate's own image, so the correct
+answer must be itself): embedding **64/64**, histogram 62/64, the two failures both ties.
+
+Everything is CLI-driven now (`--word`, `--image`, `--method`, `--backend`, `--dtype`, `--top-k`,
+`--device`) — the old hardcoded `input_text` / `test_image_path` globals are gone. `./output/` is
+created automatically, and CSVs are written `utf-8-sig` like the other script.
+
+Output: `output/output_embedding_<backend>_similarity.{xlsx,csv}` and/or
+`output/output_histogram_similarity.{xlsx,csv}`, columns `UNICODE`, `SinoNom`, `Similarity`.
+
+**Now validated on real scans** (`test_images/`, 59 images, added later than the Drive bundle). The
+predicted widening happened: on clean corpus queries the two methods agreed on 6/10 of the top-10;
+on real scans they agree on top-1 only 23/59 (39.0%). See `evaluate_test_images.py` above.
 
 ## Setting up (nothing but code is in git)
 
@@ -137,8 +349,8 @@ unzip images.zip -d images          # -> ./images/<UNICODE>.jpg
 # final_characteristics-v2.xlsx and QuocNgu_SinoNom_Dic.xlsx go in the repo root
 ```
 
-`search_all_chars_in_corpus.py` creates `./output/` itself; `search_use_QuocNgu_mapping.py` still
-requires it to exist, and also needs `./test_images/<name>.jpg` matching its `test_image_path`.
+Both search scripts create `./output/` themselves. `test_images/` ships separately from the Drive
+bundle (a `test_images-*.zip`); unzip it into the repo root.
 
 ```bash
 python search_all_chars_in_corpus.py --backend chinese-clip     # or resnet18 / resnet18-gray / dinov2
@@ -156,6 +368,31 @@ faiss-cpu 1.15, opencv-python 5.0 — all have wheels for 3.14, so no need to do
 `requirements.txt` is unpinned; the code accommodates both transformers v4 and v5 (see the
 `pooler_output` note above).
 
+**On the H100 server (the machine this work is moving to), the setup is different — use `.venv/`.**
+That box runs Python 3.10.12 with torch 2.6.0+cu124 and transformers 4.57.6 (the *v4* branch, so
+`get_image_features` returns a tensor directly) already installed in the **system** interpreter,
+which four vLLM engines depend on. Do **not** `pip install` into system Python — a resolver that
+decides to move torch will take vLLM down with it. The venv is built with
+`--system-site-packages` so it reuses the system torch rather than pulling its own copy:
+
+```bash
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install "torchvision==0.21.0" faiss-cpu opencv-python-headless
+.venv/bin/python search_all_chars_in_corpus.py --backend chinese-clip --device cuda --batch-size 32
+```
+
+Three deviations from `requirements.txt` that are deliberate, not drift:
+
+- **`torchvision` must be pinned to 0.21.0** — that is the build matching torch 2.6.0. Unpinned,
+  pip drags in a torch upgrade.
+- **`opencv-python-headless`, not `opencv-python`** — headless drops the `libGL.so.1` dependency the
+  server does not have, and Part 2 only uses `imread`/`resize`/`Canny`/`calcHist`, no GUI calls.
+- pandas, numpy, openpyxl, pillow, torch, transformers, scikit-learn come from system site-packages;
+  only the three above live in the venv.
+
+Verify the venv did not shadow torch — `ls .venv/lib/python3.10/site-packages/ | grep ^torch` should
+show `torchvision` and nothing else.
+
 ### Running on GPU
 
 Pass `--device cuda`. Everything here is **inference only** — no training — so it is cheap:
@@ -167,53 +404,145 @@ check); if VRAM is tight, keep the batch small and consider
 A future contrastive/Siamese fine-tune (Person 3's stretch direction) would *not* fit in that
 headroom — it needs gradients and optimizer state, so it requires a real GPU allocation.
 
-### Throughput (measured, 16-core CPU, no GPU, batch 64)
+### Throughput (measured)
 
-| backend | img/s | full 26k pass |
-|---|---|---|
-| `resnet18` | ~347 | ~75 s |
-| `resnet18-gray` | ~403 | ~65 s |
-| `chinese-clip` | ~5–9 | ~1 hour |
-| `dinov2` | ~7 | ~1 hour |
+| backend | CPU 16-core, batch 64 | H100, batch 32–64 | full 26k pass on GPU |
+|---|---|---|---|
+| `resnet18` | ~347 img/s | **3950 img/s** | 6.6 s |
+| `resnet18-gray` | ~403 img/s | **3937 img/s** | 6.6 s |
+| `chinese-clip` | ~5–9 img/s | **358 img/s** | 73 s |
+| `chinese-clip-large` (fp16) | not measured | **354 img/s** | 74 s |
+| `chinese-clip-huge` (fp16) | not measured | **283 img/s** | 92 s |
+| `dinov2` | ~7 img/s | **306 img/s** | 85 s |
 
-The ViT backends are painful on CPU — this is exactly why the work is moving to the GPU server.
-Use `--limit N` while iterating.
+Note that `chinese-clip-large` costs essentially nothing over base (354 vs 358 img/s) despite being
+2× the parameters — fp16 pays for the extra size. That is what makes it the easy default.
+
+The GPU move paid off exactly where it mattered: the ViT backends went from ~1 hour per pass to
+~1 minute (**~45×**), so `--limit` is no longer needed for iteration. ResNet gained ~11×.
+
+**`use_fast=True` has been tried and rejected — do not "fix" it again.** The ViT backends are
+preprocessing-bound, not GPU-bound (image load/decode is only ~10,000 img/s, so it is not the
+culprit), and the HF fast processor *is* 3.1× faster in isolation (1700 vs 548 img/s). It still
+loses end to end:
+
+| | isolated preprocess | full corpus, chinese-clip | interleaved A/B, 4k imgs |
+|---|---|---|---|
+| `use_fast=False` | 548 img/s | **358 img/s** | **595.9 ± 8.9 img/s** |
+| `use_fast=True` | 1700 img/s | 311 img/s | 521.8 ± 144.6 img/s |
+
+The fast path uses multi-threaded torch CPU ops that contend with the vLLM workers sharing this box;
+its throughput swings roughly 2× run to run (320–650 img/s across three interleaved reps) and it was
+slower on both backends at full scale. The slow PIL path is single-threaded and therefore stable.
+Both processors are set explicitly to `use_fast=False` in `feature_extractors.py`, which also
+silences the HF deprecation warning.
+
+Quality is *not* the reason to prefer either: the two paths agree to cosine ≥ 0.99996 on all 26,044
+embeddings, so HF's "minor differences in outputs" warning is immaterial here.
+
+**Caveat on every throughput number in this file:** the H100 is shared with four vLLM engines whose
+load varies, so timings are reproducible to maybe ±10%, not better. The *quality* metrics are exact
+and deterministic; the speed metrics are indicative.
 
 ## Current status — pick up here
 
-The immediate next step is to **finish Person 1's benchmark on GPU**:
+**Person 1's work is complete.** All six backends have been run over the full corpus on the H100,
+compared, and written up in **[`BENCHMARK.md`](BENCHMARK.md)** — the deliverable. Everything below
+is the condensed version; `BENCHMARK.md` has the full analysis, method, and limitations.
+
+Reproduce end to end (~6 minutes total on GPU, embeddings are cached afterwards):
 
 ```bash
-python search_all_chars_in_corpus.py --backend resnet18      --device cuda
-python search_all_chars_in_corpus.py --backend resnet18-gray --device cuda
-python search_all_chars_in_corpus.py --backend chinese-clip  --device cuda --batch-size 32
-python search_all_chars_in_corpus.py --backend dinov2        --device cuda --batch-size 32
-python benchmark_extractors.py --backends resnet18 resnet18-gray chinese-clip dinov2
+.venv/bin/python search_all_chars_in_corpus.py --backend resnet18           --device cuda
+.venv/bin/python search_all_chars_in_corpus.py --backend resnet18-gray      --device cuda
+.venv/bin/python search_all_chars_in_corpus.py --backend chinese-clip       --device cuda --batch-size 32
+.venv/bin/python search_all_chars_in_corpus.py --backend chinese-clip-large --device cuda --batch-size 32 --dtype fp16
+.venv/bin/python search_all_chars_in_corpus.py --backend chinese-clip-huge  --device cuda --batch-size 32 --dtype fp16
+.venv/bin/python search_all_chars_in_corpus.py --backend dinov2             --device cuda --batch-size 32
+.venv/bin/python benchmark_extractors.py   # defaults to all six
+.venv/bin/python benchmark_search.py       # exact-vs-ANN study, reads the caches
 ```
 
-Then write up the comparison (speed + proxy metrics + contact sheets) as Person 1's deliverable.
+`benchmark_extractors.py` finds each backend's cache whichever precision it was built at, so the
+mixed fp32/fp16 comparison above works without extra flags.
 
-**What is already known.** Full corpus (26,044 glyphs), top-K = 20, both ResNet backends complete:
+### Results — full corpus (26,044 glyphs), top-K = 20
 
-| backend | radical@k ↑ | stroke_mae@k ↓ | ids_jaccard@k ↑ |
-|---|---|---|---|
-| `resnet18` | 0.2315 | 2.8939 | 0.1031 |
-| `resnet18-gray` | 0.2202 | 2.5659 | 0.1020 |
+| backend | dtype | dim | radical@k ↑ | stroke_mae@k ↓ | ids_jaccard@k ↑ |
+|---|---|---|---|---|---|
+| `resnet18` (baseline) | fp32 | 512 | 0.2316 | 2.8942 | 0.1031 |
+| `resnet18-gray` | fp32 | 512 | 0.2202 | 2.5658 | 0.1020 |
+| `chinese-clip` | fp32 | 512 | 0.4843 | 2.6296 | 0.1997 |
+| **`chinese-clip-large`** | fp16 | 768 | **0.5361** | 2.6992 | 0.2113 |
+| `chinese-clip-huge` | fp16 | 1024 | 0.5147 | 2.6547 | **0.2144** |
+| `dinov2` | fp32 | 1536 | 0.3081 | **2.3397** | 0.1251 |
 
-Two things to carry forward:
+Five things to carry forward:
 
-1. **The `conv1` random-init hypothesis did not pan out.** Fixing it (`resnet18-gray`) improved
-   stroke MAE but slightly *hurt* radical@k and left IDS overlap flat — it is not the main reason
-   the baseline is weak. Report this honestly rather than quietly dropping the variant; a negative
-   result is still a result, and it means the gain (if any) has to come from the ViT backends.
-2. **Chinese-CLIP looked clearly better on a 200-character trial** (radical@k 0.398 vs 0.278,
-   ids_jaccard 0.102 vs 0.067 against `resnet18`). Do **not** quote those numbers as results — a
-   200-row `--limit` slice is a contiguous, unrepresentative block of the table. They are only a
-   reason to expect the full run to be favourable. The full-corpus ViT run was started on CPU and
-   deliberately killed once the GPU server became the plan, so no ViT cache exists yet.
+1. **Chinese-CLIP wins by a wide margin, and `-large` is the pick.** `chinese-clip-large` reaches
+   radical@k **2.31×** the baseline (0.5361 vs 0.2316) and ids_jaccard **2.05×** (0.2113 vs 0.1031).
+   The earlier 200-character trial on the base model predicted 0.398 and was, if anything,
+   *pessimistic*. This vindicates the original hypothesis that a Han-glyph-aware prior beats an
+   ImageNet CNN.
+2. **Scale helps, then saturates and reverses.** base → large is +10.7% relative on radical@k
+   (0.4843 → 0.5361), but large → huge is **−4.0%** (0.5361 → 0.5147) while costing 33% more
+   dimensions and 20% more time. `huge` edges out `large` only on ids_jaccard (0.2144 vs 0.2113).
+   Do not assume the next bigger checkpoint is better — the curve has already turned. If someone
+   proposes ViT-G, this is the evidence that it probably is not worth the VRAM.
+3. **DINOv2 is complementary to the CLIP family, not simply worse.** Every `chinese-clip*` backend
+   wins on radical and IDS overlap — the *structural/semantic* signals — while DINOv2 holds the best
+   stroke-count MAE (2.3397), i.e. it tracks visual density better. Worth saying explicitly in the
+   report instead of declaring one winner; an ensemble or a rerank is a natural follow-up (and
+   overlaps Person 2's scope).
+4. **The `conv1` random-init hypothesis still does not pan out** — confirmed at full scale.
+   `resnet18-gray` improves stroke MAE (2.5658 vs 2.8942) but *hurts* radical@k (0.2202 vs 0.2316)
+   and leaves IDS flat. Keep reporting this negative result honestly; it is what motivated moving to
+   ViT backends in the first place.
+5. **Backend agreement is very low — mean top-20 overlap is 1.5–2.6 of 20 (8–13%).** Even the two
+   closest (`chinese-clip` / `dinov2`, 2.57) disagree on ~87% of retrieved neighbours. The backends
+   are not converging on one "true" answer, which means the proxy metrics are doing real work in
+   separating them, *and* that a human-judged evaluation (Person 3) will be decisive rather than
+   confirmatory.
+
+Qualitatively the contact sheets match the metrics: for a 犭-radical query, `chinese-clip` returns
+猎狺猜獍獖獐猗 (nearly all same radical) where `resnet18` returns 猜指𢯡褃棈偝精 (mixed 犭/扌/礻/米).
+
+**Reproducibility is confirmed across machines.** The `resnet18` / `resnet18-gray` numbers above
+match the values previously recorded on a different box (Python 3.14 / torch 2.13) to within 3e-4 —
+`set_deterministic()` is doing its job; do not weaken it.
 
 Any `output/embeddings_*.npz` from a previous machine can be reused (the benchmark reads them by
 filename), but recomputing on GPU is fast enough that copying is rarely worth it.
+
+### Faiss: keep `IndexFlatIP`, the ANN question is already settled
+
+`benchmark_search.py` compared exact Flat against HNSW / IVFFlat / IVFPQ. HNSW is the best ANN
+option — 99.1% recall@20 at 20× the speed — but at this corpus size the speedup buys nothing:
+
+| N | exact ms/query | full-corpus search | embed @354 img/s | search share |
+|---|---|---|---|---|
+| **26,044 (today)** | 0.195 | 5 s | 74 s | **6%** |
+| 100,000 | 0.633 | 63 s | 282 s | 18% |
+| 500,000 | 5.484 | 2,742 s | 1,412 s | 66% |
+| 1,000,000 | 7.532 | 7,532 s | 2,825 s | 73% |
+
+Embedding is O(N) but a full-corpus sweep is O(N²), so search's share only grows. **The crossover is
+around N ≈ 300,000** — that is where search overtakes embedding. Below it, trading exactness for
+speed optimizes 6% of the runtime while giving up the one thing that is actually scarce here
+(retrieval quality). Above ~500k it becomes mandatory: at 1M, exact costs 2.1 hours per sweep versus
+~4.7 minutes for HNSW at `efSearch=64`.
+
+So: **do not swap the index.** If the corpus ever passes ~300k, switch to `IndexHNSWFlat` with
+`efSearch=64` and re-measure recall — recall was only ever measured at 26k and HNSW recall degrades
+as N grows, so the 99.1% figure does not transfer. IVFPQ is a dead end regardless: 0.60 recall.
+
+Latency beyond 26k was measured on random vectors (timing barely depends on the data); recall never
+was. `benchmark_search.py` keeps the two separate on purpose — do not merge them.
+
+**Part 2 is upgraded, working, and now validated on real scans** — `search_use_QuocNgu_mapping.py`
+defaults to embeddings and reuses Part 1's cache. It is also **labelled**: all 59 scans have a
+`correct_unicode` in `output/label_sheets/label_template.csv`, so Part 2 has a real accuracy number
+(0.4746 embedding / 0.4407 histogram). Read the caveats in BENCHMARK.md §10.6 before quoting it.
 
 ## Gotchas already hit (don't rediscover these)
 
@@ -231,8 +560,13 @@ filename), but recomputing on GPU is fast enough that copying is rarely worth it
 - **Piping a long-running script through `grep` block-buffers its progress output.** Progress looked
   frozen for many minutes during the first full run. Write to a file or drop the pipe.
 - **Console encoding on Windows is cp1252 and dies on Sino-Nôm glyphs.** Any script that prints
-  characters needs `sys.stdout.reconfigure(encoding='utf-8')`. CSV output uses `utf-8-sig` so Excel
-  opens it correctly.
+  characters needs `sys.stdout.reconfigure(encoding='utf-8')`. Both search scripts now do; keep it
+  if you touch their `main()`.
+- **Write CSVs as `utf-8-sig`.** Without the BOM Excel opens Sino-Nôm output as mojibake. Both
+  search scripts pass it explicitly.
+- **`RADICAL` is a dictionary convention, not a visual property** — it is absent from the
+  character's own IDS decomposition 43.3% of the time. Treat `radical@k` as a proxy with a ~0.73
+  ceiling (see `analyze_metric_ceiling.py`), never as an accuracy that should approach 1.0.
 
 ## Known directions for improvement (from README.txt)
 

@@ -8,3 +8,4 @@ transformers
 faiss-cpu
 opencv-python
 scikit-learn
+scipy
