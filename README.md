@@ -18,12 +18,56 @@ toán OCR/đối chiếu chữ Nôm cổ.
   | `resnet18` | ResNet18 ImageNet (baseline gốc, giữ nguyên để so sánh) | 512 |
   | `resnet18-gray` | ResNet18 nhưng `conv1` khởi tạo từ trọng số pretrained thay vì random | 512 |
   | `chinese-clip` | [OFA-Sys/chinese-clip-vit-base-patch16](https://huggingface.co/OFA-Sys/chinese-clip-vit-base-patch16) | 512 |
+  | **`chinese-clip-large`** | [OFA-Sys/chinese-clip-vit-large-patch14](https://huggingface.co/OFA-Sys/chinese-clip-vit-large-patch14) — **mặc định nên dùng** | 768 |
+  | `chinese-clip-huge` | [OFA-Sys/chinese-clip-vit-huge-patch14](https://huggingface.co/OFA-Sys/chinese-clip-vit-huge-patch14) | 1024 |
   | `dinov2` | [facebook/dinov2-base](https://huggingface.co/facebook/dinov2-base) | 1536 |
 
 - **So sánh các backend** — `benchmark_extractors.py`
   Đo tốc độ + 3 chỉ số proxy chất lượng (`radical@k`, `stroke_mae@k`, `ids_jaccard@k`) suy ra từ
   các cột `RADICAL` / `STROKE_NUM` / `SHAPE_MORPH` mà pipeline chính không dùng tới, cộng thêm
   contact sheet ảnh (`output/contact_sheet_<backend>.png`) để đối chiếu bằng mắt.
+
+  **Kết quả đã đo trên full corpus: [`BENCHMARK.md`](BENCHMARK.md).** Tóm tắt —
+  `chinese-clip-large` thắng baseline ResNet18 **2,31×** ở `radical@k` (0,5361 vs 0,2316) và
+  **2,05×** ở `ids_jaccard@k`. Scale tiếp lên `chinese-clip-huge` thì *kém đi*, nên ViT-L là điểm
+  ngọt. `dinov2` thắng ở `stroke_mae@k` nên bổ sung cho họ CLIP.
+
+- **So sánh phương án search** — `benchmark_search.py`
+  Đối chiếu Faiss `IndexFlatIP` (chính xác tuyệt đối) với HNSW / IVFFlat / IVFPQ về recall@20 và độ
+  trễ, ở nhiều cỡ corpus. Kết luận: **giữ `IndexFlatIP`** — ở 26k, search chỉ chiếm 6% thời gian;
+  ANN chỉ đáng dùng khi corpus vượt ~300k. Chi tiết ở mục 7 của `BENCHMARK.md`.
+
+- **`radical@k` dừng ở 0,5 — bão hoà hay là trần của chính nhãn?** — `analyze_metric_ceiling.py`
+  Trần lý thuyết của `radical@20` là **0,9862** (chỉ 3% query bị chạm trần) nên **không phải** do
+  top-k thiếu. Nhưng `RADICAL` không phải nhãn thị giác thuần tuý: bộ thủ chỉ thật sự xuất hiện
+  trong hình chữ ở **56,7%** số ký tự, và một oracle *biết trước* phân rã IDS cũng chỉ đạt **0,7338**.
+  So với trần đúng đó, `chinese-clip-large` (0,5361) đang ở **73% quãng đường** và **24,4× mức ngẫu
+  nhiên**. Chi tiết + hướng đi tiếp theo ở mục 9 của `BENCHMARK.md`.
+
+- **Sinh cặp dương để fine-tune** — `render_fonts.py`
+
+  Corpus chỉ có 1 ảnh/ký tự nên không có cặp "cùng chữ, khác kiểu" nào để dạy mô hình bất biến kiểu
+  chữ. Script render lại toàn bộ 26.044 ký tự qua 7 kiểu chữ (minh, tống, khải, hắc, phỏng tống),
+  phủ hợp nhất **100,0%**, ra 131.604 ảnh gán nhãn sẵn bằng mã Unicode. Font tải qua
+  `download_fonts.sh`.
+
+- **Làm ảnh render giống scan thật** — `scan_augment.py`
+
+  Render sạch vẫn quá dễ so với scan thật (hit@1 0,70 vs 0,07). Đo 6 chỉ số trên 59 ảnh scan cho
+  thấy khoảng cách nằm ở **độ nét (6,55×), tương phản (2,54×), độ dày nét và nhiễu** — không phải ở
+  font. `degrade()` mô phỏng đúng sáu trục đó, hiệu chỉnh theo số đo (`--calibrate`: sai lệch log
+  0,880 → 0,103). Kéo hit@1 về 0,1986, tức từ *dễ hơn 9,4×* xuống *dễ hơn 2,8×*. Bật bằng
+  `render_fonts.py --augment N`. Phần 2,8× còn lại là khác biệt **cấu trúc** (bút lông, hành thư),
+  phải có dữ liệu thư pháp thật mới lấp được.
+
+- **Đánh giá trên ảnh query THẬT** — `evaluate_test_images.py`
+  Tên file trong `test_images/` gõ Telex (`cofn.jpg` = "còn") nên **giải mã ra được nhãn thật** —
+  đây là phép đo duy nhất không phải proxy. Kết quả: tìm trên toàn corpus đạt **hit@1 = 0,0847**
+  (179× ngẫu nhiên, nhưng tuyệt đối là thấp). Nguyên nhân là **lệch phân phối**: query là chữ viết
+  tay/hành thư, corpus là khải thư in bằng font. Chi tiết ở mục 10 của `BENCHMARK.md`.
+  Cả 59 ảnh đã có nhãn người gán, nên Phần 2 cũng có accuracy thật: **0,4746** (embedding) so với
+  **0,4407** (histogram) — chênh đúng 2 ảnh, xem cảnh báo ở mục 10.6 về việc không được đọc khoảng
+  cách này là kết luận.
 
 - **Phần 2 — Tìm top-k tương đồng character, so sánh trong nhóm cùng nghĩa "Quốc Ngữ"**
   Dùng `search_use_QuocNgu_mapping.py` + `images.zip` + `final_characteristics-v2.xlsx` +
@@ -42,6 +86,7 @@ https://drive.google.com/drive/folders/12kfJjiM866taJS_-QhOS30TmRi1000Bt
 
 Bao gồm:
 - Bộ ảnh `.zip` để đối sánh tương đồng (giải nén vào thư mục `./images/`)
+- `test_images-*.zip` — ảnh query thật để đánh giá (giải nén vào `./test_images/`)
 - File mapping hỗ trợ (`final_characteristics-v2.xlsx`, `QuocNgu_SinoNom_Dic.xlsx`, đặt ở thư mục
   gốc repo)
 - File code `.py` tham khảo
@@ -69,11 +114,26 @@ python search_all_chars_in_corpus.py --backend resnet18       # baseline gốc
 python search_all_chars_in_corpus.py --backend dinov2 --limit 500   # chạy thử nhanh
 
 # So sánh các backend (chạy Phần 1 cho từng backend trước, embeddings được cache lại)
-python benchmark_extractors.py --backends resnet18 resnet18-gray chinese-clip dinov2
+python benchmark_extractors.py            # mặc định chạy cả sáu backend
 
-# Phần 2: chỉnh input_text + test_image_path trong file trước khi chạy,
-# và cần có ảnh test trong ./test_images/
-python search_use_QuocNgu_mapping.py
+# So sánh phương án search, và phân tích trần của chỉ số
+python benchmark_search.py
+python analyze_metric_ceiling.py
+
+# Đánh giá trên ảnh query thật (cần giải nén test_images-*.zip vào ./test_images/)
+python evaluate_test_images.py --device cuda
+python evaluate_test_images.py --sheets      # phiếu gán nhãn: query + TOÀN BỘ ứng viên
+python evaluate_test_images.py --part 2 --labels output/label_sheets/label_template.csv
+python evaluate_test_images.py --part 2 --labels output/label_sheets/label_template.csv \
+       --min-confidence high                 # chỉ chấm trên 53 nhãn chắc chắn
+
+bash download_fonts.sh          # tải font CJK vào ./fonts
+python render_fonts.py          # 131.604 ảnh render đa font -> output/rendered/
+python scan_augment.py --calibrate           # bảng hiệu chỉnh suy giảm
+python render_fonts.py --augment 2 --strength 1.0   # thêm bản giống scan
+
+# Phần 2 - mặc định dùng embedding, tái dùng cache của Phần 1
+python search_use_QuocNgu_mapping.py --word ta --image ./images/54B1.jpg --method both
 ```
 
 Lưu ý tốc độ (CPU 16 nhân, không GPU, batch 64): ResNet18 ~350-400 ảnh/s (chạy full 26k ảnh
@@ -91,5 +151,16 @@ nghiệm, và chạy full ở chế độ nền.
 
 ## Hướng cải tiến
 
-- Thử các embedding model dòng Transformer để cải thiện chất lượng đặc trưng ảnh so với ResNet18.
-- Áp dụng hướng decompose thành phần chữ Sino-Nôm theo paper tham khảo ở trên.
+Theo thứ tự chi phí tăng dần (lập luận đầy đủ ở mục 9.5 của `BENCHMARK.md`):
+
+1. ~~Gán nhãn `test_images/`~~ — **xong**, 59/59 ảnh, xem mục 10.6 của `BENCHMARK.md`.
+2. **Scan thêm ảnh thật.** Đây mới là nút thắt hiện tại: n = 59 cho khoảng tin cậy 95% rộng ±13,3
+   điểm, nên mọi cải tiến dưới ~15 điểm đều không chứng minh được. Cần n ≈ 150 để xuống ±8 điểm.
+3. **Đánh giá bằng người** trên ~200 cặp — các chỉ số còn lại đều là nhãn yếu.
+4. **Ensemble `chinese-clip-large` + `dinov2`** — hai model chỉ trùng 12,9% top-k và mạnh ở hai chỉ
+   số khác nhau, dùng lại cache có sẵn nên gần như miễn phí.
+5. **Finetune metric learning** — đòn bẩy lớn nhất, và mục 10 đã chỉ rõ nên học gì: vừa học thành
+   phần IDS (held-out chia theo bộ thủ), vừa học **bất biến với kiểu thư pháp** bằng cách ghép cặp
+   scan viết tay ↔ bản in cùng một ký tự. Áp dụng hướng decompose theo paper tham khảo ở trên.
+
+~~Thử các embedding model dòng Transformer~~ — đã làm, xem `BENCHMARK.md`.
