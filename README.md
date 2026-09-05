@@ -69,6 +69,29 @@ toán OCR/đối chiếu chữ Nôm cổ.
   **0,4407** (histogram) — chênh đúng 2 ảnh, xem cảnh báo ở mục 10.6 về việc không được đọc khoảng
   cách này là kết luận.
 
+- **Báo cáo nộp** — `build_report.py` → `report/BaoCao.pdf` (11 trang: 8 trang thân bài + 3 trang
+  phụ lục tái lập). Sinh bằng script chứ không gõ tay, để mọi con số truy ngược được về lệnh đã
+  chạy. Máy phát triển không có TeX nên `report/report.tex` (bản kỹ thuật dài) **chưa từng biên
+  dịch** — bản `.docx`/`.pdf` mới là bản nộp.
+
+- **Đóng gói bài nộp** — `package_submission.py` → `submission/` gồm mã nguồn, tập đánh giá + nhãn
+  người gán, checkpoint (bản fp16, 165 MB, embedding **giống hệt từng bit** bản fp32), báo cáo, và
+  `MANIFEST.md` có checksum. Mô hình pretrain bên ngoài chỉ ghi định danh, không nộp kèm.
+
+- **Fine-tune** — `finetune_glyph.py` ← **kết quả lớn nhất của đồ án**
+  Học bất biến kiểu chữ bằng SupCon trên 141.981 ảnh render đa font, nhãn = mã Unicode. Trên chính
+  59 scan thật đó (không một pixel nào vào huấn luyện):
+
+  | | zero-shot `large` | **finetuned** |
+  |---|---:|---:|
+  | Phần 1, hit@1 trên 26.044 ký tự | 0,0847 | **0,5932** |
+  | Phần 2, đúng top-1 trong nhóm | 0,4746 | **0,8136** |
+
+  Hai khoảng tin cậy 95% **rời hẳn nhau** — đây là lần đầu n=59 đủ để kết luận, vì hiệu ứng đủ lớn
+  chứ không phải vì mẫu to ra. Lớp Unicode *chưa từng thấy* lúc huấn luyện đạt đúng bằng lớp đã thấy
+  (0,9939 vs 0,9954), nên không phải thuộc lòng. Mục 14 của `BENCHMARK.md` ghi cả lần ArcFace bị
+  **collapse** trước đó và vì sao.
+
 - **Phần 2 — Tìm top-k tương đồng character, so sánh trong nhóm cùng nghĩa "Quốc Ngữ"**
   Dùng `search_use_QuocNgu_mapping.py` + `images.zip` + `final_characteristics-v2.xlsx` +
   `QuocNgu_SinoNom_Dic.xlsx`.
@@ -130,7 +153,21 @@ python evaluate_test_images.py --part 2 --labels output/label_sheets/label_templ
 bash download_fonts.sh          # tải font CJK vào ./fonts
 python render_fonts.py          # 131.604 ảnh render đa font -> output/rendered/
 python scan_augment.py --calibrate           # bảng hiệu chỉnh suy giảm
-python render_fonts.py --augment 2 --strength 1.0   # thêm bản giống scan
+python render_fonts.py --augment 2 --strength 1.0   # thêm bản giống scan; KHÔNG cần cho fine-tune,
+                                                   # finetune_glyph.py suy giảm online lúc nạp
+
+# Fine-tune (mục 14 BENCHMARK.md) - ~30 phút, 3,7 GB VRAM
+python finetune_glyph.py --smoke                   # 200 lớp, kiểm đường ống trước
+python finetune_glyph.py --epochs 6 --device cuda  # -> output/finetune/best.pt
+
+# Chấm lại bằng chính đường ống cũ, backend mới nạp thẳng checkpoint
+python search_all_chars_in_corpus.py --backend chinese-clip-ft --dtype fp16 --device cuda
+python evaluate_test_images.py --backend chinese-clip-ft --dtype fp16 --device cuda \
+       --labels output/label_sheets/label_template.csv
+
+# Báo cáo và gói nộp
+python build_report.py                             # -> report/BaoCao.docx + BaoCao.pdf
+python package_submission.py --with-model --zip    # -> submission/ và submission.zip
 
 # Phần 2 - mặc định dùng embedding, tái dùng cache của Phần 1
 python search_use_QuocNgu_mapping.py --word ta --image ./images/54B1.jpg --method both
@@ -159,8 +196,8 @@ Theo thứ tự chi phí tăng dần (lập luận đầy đủ ở mục 9.5 c�
 3. **Đánh giá bằng người** trên ~200 cặp — các chỉ số còn lại đều là nhãn yếu.
 4. **Ensemble `chinese-clip-large` + `dinov2`** — hai model chỉ trùng 12,9% top-k và mạnh ở hai chỉ
    số khác nhau, dùng lại cache có sẵn nên gần như miễn phí.
-5. **Finetune metric learning** — đòn bẩy lớn nhất, và mục 10 đã chỉ rõ nên học gì: vừa học thành
-   phần IDS (held-out chia theo bộ thủ), vừa học **bất biến với kiểu thư pháp** bằng cách ghép cặp
-   scan viết tay ↔ bản in cùng một ký tự. Áp dụng hướng decompose theo paper tham khảo ở trên.
+5. ~~Finetune metric learning~~ — **xong**, xem mục 14 của `BENCHMARK.md`. Đòn bẩy tiếp theo là
+   **hard negative mining**: loss rơi về 0,0068 chỉ sau 400 bước vì 24 lớp lấy ngẫu nhiên từ 23.440
+   thì phân biệt quá dễ, nên phải nhồi vào cùng batch những chữ *trông giống nhau*.
 
 ~~Thử các embedding model dòng Transformer~~ — đã làm, xem `BENCHMARK.md`.

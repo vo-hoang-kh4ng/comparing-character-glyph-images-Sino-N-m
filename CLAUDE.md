@@ -62,6 +62,7 @@ product == cosine similarity (what the Faiss `IndexFlatIP` downstream assumes). 
 | `chinese-clip` | OFA-Sys/chinese-clip-vit-base-patch16 | 512 | Image tower, projected embedding (`get_image_features`). Pretrained on Chinese image–text pairs, so its prior is closest to Han glyphs. |
 | **`chinese-clip-large`** | OFA-Sys/chinese-clip-vit-large-patch14 | 768 | **Best quality measured so far.** Same family as base, so base→large→huge isolates the effect of scale alone. |
 | `chinese-clip-huge` | OFA-Sys/chinese-clip-vit-huge-patch14 | 1024 | Bigger than large but *not* better on radical@k — see the saturation note in the results. |
+| **`chinese-clip-ft`** | ViT-B/16 + `output/finetune/best.pt` | 512 | **Best on real scans by a wide margin** — hit@1 0.5932 vs large's 0.0847. Same architecture and embedding width as `chinese-clip`, so every downstream script works unchanged; only the weights differ. Loading fails loudly if the checkpoint is missing, because a silent fallback would report zero-shot numbers under a finetuned name. Override the path with `$GLYPH_FT_CKPT`. |
 | `dinov2` | facebook/dinov2-base | 1536 | CLS token ⊕ mean-pooled patch tokens — CLS carries global shape, patch mean carries stroke texture. |
 
 The three `chinese-clip*` backends all run through one `ChineseClipExtractor`; the embedding width
@@ -235,6 +236,10 @@ byte-for-byte: `dau` → "dâu" (Kiều's "bể dâu", distinct from `ddau.jpg` 
 (n=59, `chinese-clip-large`/fp16). That is 179× the random baseline but low in absolute terms — and
 much worse than the proxy metrics suggest. Report it honestly; it is the project's first real number.
 
+**After fine-tuning this becomes 0.5932** (`chinese-clip-ft`, BENCHMARK.md §14) — the two 95% CIs
+are disjoint, so this is the one comparison in the project that n=59 can actually carry. Keep the
+zero-shot number in every table anyway: it is what makes the gain legible.
+
 The cause is **distribution shift, not a weak model.** Symptom: a hub effect — 攅 is returned top-1
 for 6 different queries, 劕/湸/旦/刟 for 3 each. Measured gaps: ink fill 0.353 vs 0.184, background
 249 vs 255, and the scans are **not square** (96×128, 88×96) while every corpus image is 70×70, so a
@@ -260,6 +265,10 @@ won** (the scan writes "qua" as 戈 not 過, "năm" as 𢆥 not 年, "một" as 
 Measured: embedding 28/59 = **0.4746**, histogram 26/59 = 0.4407, random-in-group 0.1987. Both beat
 random by >2x, so Part 2 genuinely works. All three newly recovered scans are missed by *both*
 methods, so they only grew the denominator.
+
+With `chinese-clip-ft` the same measurement gives **48/59 = 0.8136** (MRR 0.8983), and 45/53 =
+0.8491 under `--min-confidence high`. That is a 22-image gap over histogram with disjoint CIs —
+unlike the zero-shot 2-image gap, this one supports a conclusion on its own.
 
 **The 11 `med`/`low` rows were re-reviewed** (BENCHMARK.md §10.6.1) by re-cropping the deciding half
 of each 94×104-to-178×162 scan at 460–520px. Five rows rose to `high`, `gia` dropped to `low`, and
@@ -334,6 +343,84 @@ Output: `output/output_embedding_<backend>_similarity.{xlsx,csv}` and/or
 predicted widening happened: on clean corpus queries the two methods agreed on 6/10 of the top-10;
 on real scans they agree on top-1 only 23/59 (39.0%). See `evaluate_test_images.py` above.
 
+### `finetune_glyph.py` — the fine-tune, and the one that failed first
+
+Trains the Chinese-CLIP ViT-B/16 image tower for **typeface invariance**: same Unicode codepoint
+across different fonts must land on the same vector. Label is the codepoint and nothing else —
+deliberately *not* `RADICAL`, because BENCHMARK.md §9.4 warns that training on a label and then
+reporting that label's metric is measuring the training set.
+
+Results are in BENCHMARK.md §14. The short version: real-scan hit@1 0.0847 → **0.5932**, and
+held-out Unicode classes score the same as trained ones (0.9939 vs 0.9954), so it is not memorising.
+
+**ArcFace collapsed — do not retry it.** The first design used ArcFace over 23,440 classes. After
+one epoch, render→corpus hit@1 went 0.79 → 0.0035 on *seen* classes and 0.80 → 0.0050 on unseen,
+with loss flat near ln(N). Falling on both sides means collapse, not overfitting. The cause is the
+data shape, not a hyperparameter: 23,440 classes with ~6 images each means the randomly-initialised
+head never organises, so what it back-propagates is noise — and Adam normalises by gradient
+magnitude, so "lr = 1e-5" still moves the weights far enough to destroy the pretrained structure in
+~3,000 steps. `clip_grad_norm_` does not help; clipped noise is still noise.
+
+SupCon has no learnable parameters in the loss, so there is no random head injecting noise.
+`--loss arcface` is kept only to reproduce the failure.
+
+**P×K sampling is load-bearing, not a tweak.** A random batch of 48 drawn from 23,440 classes
+contains ~0.05 positive pairs in expectation — almost every batch would have nothing to pull
+together. `PKSampler` guarantees 24 classes × 2 views.
+
+**Degradation runs online in the DataLoader**, not pre-rendered to disk. `scan_augment.degrade` is
+already calibrated (§13.4); calling it per `__getitem__` with a `(seed, epoch, index)` RNG gives a
+fresh variant every epoch, reproducibly, and costs no disk. So `render_fonts.py --augment N` is
+**not** needed for training.
+
+**Three things exist because the collapse was caught late:**
+- `--eval-steps 600` evaluates mid-epoch, so a collapse shows up in ~1 minute instead of an hour.
+- The `cos=` column is the mean pairwise cosine of 2,000 random corpus vectors — it goes to 1.0 on
+  collapse. Without it, "learning badly" and "collapsed" look identical on hit@1, and they are fixed
+  differently. It ran **0.890 → 0.000**; the 0.890 at zero-shot is itself the explanation for why
+  discrimination was weak before.
+- SupCon's collapse signature is loss parked at ln(P·K−1) = ln 47 = 3.85.
+
+**`-inf * 0 = nan`.** In `supcon_loss` the diagonal is masked to `-inf` before `logsumexp`; it must
+then be zeroed *before* multiplying by the positives mask, or the loss is `nan` from step 0.
+
+VRAM: ~3.7 GB at batch 48 with gradient checkpointing and bf16 — that is why the backbone is B/16
+and not large. large does not fit for *training* alongside the vLLM engines. If the GPU frees up,
+raise the batch size before changing the backbone, or the comparison table stops being like-for-like.
+
+### `build_report.py` and `package_submission.py` — the submission
+
+`build_report.py` generates `report/BaoCao.docx` and `.pdf` (11 pages: 8 body + 3 appendix). It is a
+script, not a hand-written document, so every number traces back to the command that produced it and
+a stale figure is one edit away rather than a hunt.
+
+**There is no TeX on this box** (no `xelatex`, no `pandoc`, no sudo), so `report/report.tex` — the
+older long-form technical report — **has never been compiled**. LibreOffice *is* installed, and it
+exports both formats the course accepts, which is why the deliverable is .docx/.pdf. If you edit the
+report, edit `build_report.py`; `report.tex` is now the superseded long version.
+
+**Nôm fonts must be in `~/.fonts`** or every Ext-B glyph renders as an empty box in the PDF — and it
+fails silently, the .docx still opens. `ensure_fonts()` copies them on every run.
+
+`package_submission.py` builds `submission/`. Three deliberate exclusions, all documented in the
+generated `data/DATA.md` and `model/MODEL.md`:
+
+- **Pretrained models are not bundled** — they are external, several GB, and download themselves.
+  Only exact HF identifiers are recorded.
+- **The 26k corpus and the two .xlsx tables are not bundled by default** (106 MB) — they are the
+  course's given data, not the group's. `--with-corpus` includes them.
+- **The 131,604 rendered images are not bundled** (1.1 GB) — one deterministic command regenerates
+  them, and `finetune_glyph.py` degrades online so the real training set never exists on disk.
+
+`label_template.csv` is *always* bundled: hand-assigned labels, not regenerable, and every Part 2
+number depends on it.
+
+**The shipped checkpoint is fp16, not fp32.** Not an approximation: `ChineseClipExtractor` calls
+`model.to(fp16)` immediately after loading, so storing fp16 just performs a cast the pipeline
+already does. Verified by rebuilding all 26,044 corpus vectors from both — max absolute difference
+0.0. Half the size for a bit-identical result. `--fp32` ships the full one, only useful for resuming
+training.
+
 ## Setting up (nothing but code is in git)
 
 Bulk data (`images.zip`, both `.xlsx` files, `materials/`, `phan_cong_cong_viec.xlsx`) is gitignored
@@ -401,8 +488,10 @@ matters because the target server's H100 is mostly occupied by vLLM workers (~3.
 check); if VRAM is tight, keep the batch small and consider
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
 
-A future contrastive/Siamese fine-tune (Person 3's stretch direction) would *not* fit in that
-headroom — it needs gradients and optimizer state, so it requires a real GPU allocation.
+A contrastive fine-tune needs gradients and optimizer state on top of that. **Measured, it does
+fit**: `finetune_glyph.py` runs at **3.7 GB** with ViT-B/16 + gradient checkpointing + bf16 at batch
+48, ~4 min/epoch. What does *not* fit is training `large` — that is the reason the finetuned
+backbone is B/16, and it is a VRAM constraint, not a modelling choice.
 
 ### Throughput (measured)
 
@@ -414,6 +503,7 @@ headroom — it needs gradients and optimizer state, so it requires a real GPU a
 | `chinese-clip-large` (fp16) | not measured | **354 img/s** | 74 s |
 | `chinese-clip-huge` (fp16) | not measured | **283 img/s** | 92 s |
 | `dinov2` | ~7 img/s | **306 img/s** | 85 s |
+| `chinese-clip-ft` (fp16) | not measured | **445 img/s** | 59 s |
 
 Note that `chinese-clip-large` costs essentially nothing over base (354 vs 358 img/s) despite being
 2× the parameters — fp16 pays for the extra size. That is what makes it the easy default.

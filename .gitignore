@@ -24,3 +24,7 @@ env/
 Thumbs.db
 test_images-*.zip
 fonts/
+
+# Gói nộp: dựng lại được bằng `python package_submission.py`, và bản --with-model nặng 166 MB.
+submission/
+submission.zip

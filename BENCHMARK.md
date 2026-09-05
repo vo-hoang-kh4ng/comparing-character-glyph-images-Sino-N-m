@@ -762,10 +762,11 @@ scan viết tay ↔ bản in cùng một ký tự.
    chính là lý do chuyển sang ViT.
 5. **Không thay Faiss `IndexFlatIP`.** Xem mục 7 — search chỉ chiếm 6% thời gian ở cỡ corpus hiện
    tại; điểm hoà vốn của ANN nằm quanh N ≈ 300.000.
-6. **Phần 2 nên dùng `--method embedding`** — nhưng lý do là **chất lượng điểm số**, không phải
-   accuracy. Histogram chấm điểm tuyệt đối cho chữ sai và chỉ đạt 62/64 ở phép thử tự truy hồi,
-   trong khi embedding đạt 64/64 (mục 8). Trên scan thật thì hai bên chỉ chênh **2 ảnh trên 59**
-   (0,4746 vs 0,4407, mục 10.6) — đừng viện accuracy để biện hộ cho lựa chọn này.
+6. **Phần 2 nên dùng `--method embedding`.** Với model zero-shot, lý do phải là *chất lượng điểm
+   số* chứ không phải accuracy: histogram chấm điểm tuyệt đối cho chữ sai và chỉ đạt 62/64 ở phép
+   thử tự truy hồi (mục 8), trong khi trên scan thật hai bên chỉ chênh **2 ảnh trên 59** (0,4746 vs
+   0,4407, mục 10.6). **Sau khi finetune thì khác hẳn**: 0,8136 vs 0,4407, chênh 22 ảnh, hai khoảng
+   tin cậy rời nhau (mục 14.2) — giờ accuracy đã đủ để tự đứng làm lý do.
 7. **Trên ảnh query thật, hiệu năng thấp hơn nhiều so với các chỉ số proxy gợi ý** — hit@1 = 0,0847
    trên toàn corpus (179× ngẫu nhiên, nhưng tuyệt đối là thấp). Nguyên nhân chính là **khoảng cách
    thư pháp**: query là scan viết tay, corpus là khải thư in bằng font. Phải nói rõ điều này trong
@@ -776,7 +777,11 @@ scan viết tay ↔ bản in cùng một ký tự.
 9. **`radical@k` = 0,5 không phải bão hoà.** Trần lý thuyết là 0,9862 nhưng trần *thực tế* — đo
    bằng oracle biết trước phân rã IDS — chỉ là 0,7338, vì `RADICAL` không phải nhãn thị giác thuần
    tuý. `chinese-clip-large` đang ở 73% quãng đường và 24,4× mức ngẫu nhiên (mục 9).
-10. **Bước tiếp theo cần đánh giá bằng người.** Mức đồng thuận giữa các backend quá thấp để kết luận
+10. **Finetune đúng là đòn bẩy lớn nhất, và đã đo được.** `chinese-clip-ft` đạt hit@1 = 0,5932 trên
+   scan thật, so với 0,0847 của `chinese-clip-large` zero-shot — hai CI rời hẳn nhau, và lớp chưa
+   từng thấy lúc huấn luyện đạt đúng bằng lớp đã thấy (0,9939 vs 0,9954) nên không phải thuộc lòng.
+   Chi tiết ở mục 14, kể cả lần ArcFace bị collapse trước đó.
+11. **Bước tiếp theo cần đánh giá bằng người.** Mức đồng thuận giữa các backend quá thấp để kết luận
    chỉ dựa trên proxy — và mục 9 cho thấy chính proxy cũng có trần riêng. Sau đó mới tới ensemble
    `chinese-clip-large` + `dinov2`, rồi finetune metric learning trên thành phần IDS.
 
@@ -917,6 +922,120 @@ nhất sinh được miễn phí, và đã ở đúng bậc độ khó của bà
    chỉ phủ 26,0% corpus (GB2312) và là bút cứng giản thể hiện đại, sai trục phong cách. Ưu tiên thấp
    hơn MCCD.
 
+## 14. Fine-tune (`finetune_glyph.py`) — kết quả lớn nhất của đồ án
+
+Mục 9.4 kết luận finetune là đòn bẩy thật; mục 13 sinh xong dữ liệu. Đây là kết quả.
+
+### 14.1 Cách làm
+
+Học **bất biến kiểu chữ**: cùng một mã Unicode qua font khác nhau phải ra cùng một vector. Nhãn duy
+nhất là **mã Unicode** — cố tình không đụng `RADICAL`/`STROKE_NUM`, vì mục 9.4 đã cảnh báo huấn luyện
+trên nhãn nào rồi báo cáo chỉ số của chính nhãn đó là đo lại tập huấn luyện.
+
+| | |
+|---|---|
+| backbone | Chinese-CLIP ViT-B/16, giữ nguyên `visual_projection` (512 chiều) |
+| loss | SupCon (InfoNCE giám sát), nhiệt độ 0,07 |
+| lấy mẫu | **P×K: 24 lớp × 2 view mỗi batch** |
+| dữ liệu | 141.981 ảnh / 23.440 lớp (đã trừ held-out) |
+| suy giảm | `scan_augment.degrade` **online** trong DataLoader, p=0,6, strength 1,0 |
+| tối ưu | AdamW, lr 1e-5, warmup 300, cosine, bf16, gradient checkpointing |
+| thời gian | ~4 phút/epoch, 6 epoch, đỉnh ở epoch 5 |
+| VRAM | **3,7 GB** — vừa chỗ trống cạnh 4 engine vLLM đang chiếm 74/80 GB |
+
+Vì sao ViT-B/16 chứ không phải large: large không vừa VRAM *lúc huấn luyện*. Nên trong bảng dưới,
+mốc so công bằng nhất là zero-shot **của chính ViT-B/16** (hit@1 = 0,0169); mốc `large` (0,0847) là
+mốc *cũ của đồ án*, và bản finetune vượt cả hai.
+
+### 14.2 Kết quả trên scan thật (`test_images/`, n = 59)
+
+Không một pixel nào của `test_images/` vào huấn luyện — `_assert_test_images_unseen` chặn cứng.
+
+| model | hit@1 | hit@10 | MRR | CI95 của hit@1 |
+|---|---:|---:|---:|---|
+| `chinese-clip` zero-shot (ViT-B/16) | 0,0169 | 0,0678 | 0,0327 | — |
+| `chinese-clip-large` zero-shot (mốc cũ, mục 10.2) | 0,0847 | 0,1864 | — | [0,028; 0,187] |
+| **`chinese-clip-ft`** | **0,5932** | **0,7966** | **0,6691** | **[0,457; 0,719]** |
+
+**Hai khoảng tin cậy rời hẳn nhau.** Đây là lần đầu trong đồ án n=59 đủ để kết luận — không phải vì
+mẫu to ra, mà vì hiệu ứng đủ lớn (35/59 so với 5/59, hơn ngẫu nhiên 1.250×).
+
+Phần 2 (xếp hạng trong nhóm cùng âm, nhãn người gán ở mục 10.6):
+
+| phương pháp | đúng top-1 | MRR | CI95 |
+|---|---:|---:|---|
+| histogram | 26/59 = 0,4407 | 0,6070 | [0,312; 0,576] |
+| embedding zero-shot (large) | 28/59 = 0,4746 | 0,6566 | [0,343; 0,609] |
+| **embedding finetuned** | **48/59 = 0,8136** | **0,8983** | **[0,691; 0,903]** |
+
+Độ nhạy `--min-confidence high` (53 nhãn chắc chắn): 45/53 = 0,8491 vs histogram 0,4717. Kết luận
+không phụ thuộc vào 6 nhãn med/low.
+
+**Điều này sửa lại kết luận 6 ở mục 12.** Trước đây khoảng cách embedding–histogram chỉ là *2 ảnh
+trên 59*, nên phải khuyến nghị embedding dựa trên chất lượng điểm số chứ không dám viện accuracy.
+Giờ khoảng cách là **22 ảnh**, hai CI rời nhau — accuracy đã đủ để tự đứng làm lý do.
+
+### 14.3 Có phải chỉ thuộc lòng 23.440 danh tính không?
+
+Phép đo: query = một bản render font, gallery = ảnh corpus, chạy riêng trên **lớp đã thấy** và **lớp
+chưa thấy** (2.604 mã Unicode bị gỡ *toàn bộ view* khỏi huấn luyện). Hai mẫu cùng cỡ, cùng cách chọn
+ngẫu nhiên — chọn theo thứ tự mã Unicode sẽ thiên về khối CJK phổ thông nên không so được.
+
+| | lớp đã thấy | lớp chưa thấy |
+|---|---:|---:|
+| trước huấn luyện | 0,7938 | 0,8041 |
+| sau huấn luyện | 0,9954 | **0,9939** |
+
+**Bằng nhau.** Không có khoảng cách thuộc lòng. SupCon không có tâm lớp học được, nên không có gì để
+nhớ — thứ nó học là phép so hai ảnh, và phép đó chuyển sang chữ chưa từng gặp nguyên vẹn.
+
+### 14.4 ArcFace đã thử và **sập** — ghi lại để không ai làm lại
+
+Thiết kế đầu là ArcFace trên 23.440 lớp (scale 32, margin 0,30, lr head 1e-3). Sau 1 epoch:
+
+| | trước | sau |
+|---|---:|---:|
+| render→corpus, lớp đã thấy | 0,7938 | **0,0035** |
+| render→corpus, lớp chưa thấy | 0,8041 | **0,0050** |
+| scan thật hit@1 | 0,0169 | **0,0000** |
+| loss | 20,5 | 19,4 (gần như đứng yên) |
+
+Sụp ở **cả hai** phía nên không phải overfit — là **collapse**, mọi ảnh dồn về một vector.
+
+Nguyên nhân là **hình dạng dữ liệu**, không phải hyperparameter: 23.440 lớp mà mỗi lớp chỉ ~6 ảnh.
+Head ArcFace khởi tạo ngẫu nhiên với 23.440 tâm không kịp tổ chức, nên gradient nó đẩy về backbone
+gần như là nhiễu. Adam chuẩn hoá theo độ lớn gradient, nên "lr nhỏ 1e-5" vẫn dịch chuyển trọng số đủ
+để phá cấu trúc pretrain trong ~3.000 bước; `clip_grad_norm_` không cứu được vì nhiễu bị cắt chuẩn
+vẫn là nhiễu.
+
+SupCon không có tham số học được nào trong loss, nên không có head ngẫu nhiên bơm nhiễu vào backbone.
+`--loss arcface` vẫn còn trong script để tái lập thất bại này, **không phải để dùng**.
+
+### 14.5 Ba thứ thêm vào để phát hiện sự cố sớm
+
+1. **`--eval-steps 600`** — eval giữa epoch. Collapse lộ ra sau ~1 phút thay vì sau cả epoch.
+2. **Cột `cos`** — cosine trung bình giữa 2.000 vector corpus ngẫu nhiên. Collapse thì số này chạy về
+   1,0. Không có nó thì "học hỏng" và "collapse" trông giống hệt nhau trên hit@1, mà hai thứ đó sửa
+   theo hai cách khác nhau. Diễn biến thực tế: **0,890 → 0,000**, tức không gian giãn ra tới mức gần
+   trực giao. Con số 0,890 lúc zero-shot tự nó giải thích vì sao khả năng phân biệt trước đây yếu.
+3. **Chữ ký collapse của SupCon** là loss đứng đúng ở ln(P·K−1) = ln 47 = 3,85.
+
+Ngoài ra `supcon_loss` có unit test tại chỗ (dương hoàn hảo → 0, collapse → ln 5, gradient hữu hạn),
+viết sau khi dính lỗi `-inf × 0 = nan` làm loss ra nan ngay bước đầu.
+
+### 14.6 Việc tiếp theo
+
+Loss rơi 2,96 → 0,0068 **chỉ sau 400 bước**, và từ epoch 1 tới 6 hit@1 chỉ dao động 0,51–0,59 không
+theo xu hướng nào. Tín hiệu huấn luyện đã cạn: 24 lớp lấy ngẫu nhiên từ 23.440 thì phân biệt quá dễ.
+
+Đòn bẩy tiếp theo, theo thứ tự:
+
+1. **Hard negative mining** — nhồi vào cùng batch những chữ *trông giống nhau* (láng giềng gần trong
+   chính không gian vector hiện tại, làm mới mỗi epoch) thay vì 24 lớp ngẫu nhiên. Rẻ nhất, và là
+   thứ duy nhất giải quyết đúng chỗ loss đang cạn.
+2. **Backbone lớn hơn** khi GPU rảnh — ViT-B/16 là ràng buộc VRAM, không phải lựa chọn.
+3. **MCCD / NomNaOCR** (mục 13.6) — render font vẫn không sinh ra được nét bút lông thật.
+
 ## Phụ lục: file kết quả
 
 | file | nội dung |
@@ -928,3 +1047,4 @@ nhất sinh được miễn phí, và đã ở đúng bậc độ khó của bà
 | `output/embeddings_<backend>.npz` | cache embedding, dùng lại cho các lần chạy sau |
 | `output/label_sheets/*.png` + `label_template.csv` | phiếu gán nhãn Phần 2 (mục 10.6) |
 | `output/rendered/<font>/<UNICODE>.png` + `manifest.csv` | 131.604 ảnh render đa font, nhãn = mã Unicode (mục 13) |
+| `output/finetune/best.pt` + `train.log` | checkpoint fine-tune và log đầy đủ mọi lần eval (mục 14) |
