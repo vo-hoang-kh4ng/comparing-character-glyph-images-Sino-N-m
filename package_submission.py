@@ -58,7 +58,7 @@ TRAIN_LOG = "output/finetune/train.log"
 
 #: Điền vào sau khi tải checkpoint lên. Để trống thì MODEL.md sẽ ghi rõ là còn thiếu, chứ không
 #: lặng lẽ sinh ra một liên kết chết.
-MODEL_URL = ""
+MODEL_URL = "https://huggingface.co/vohoangkh4ng/chinese-clip-ft-sinonom"
 
 
 def sha256(path, chunk=1 << 20):

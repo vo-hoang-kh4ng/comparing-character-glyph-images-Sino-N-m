@@ -74,6 +74,10 @@ toán OCR/đối chiếu chữ Nôm cổ.
   chạy. Máy phát triển không có TeX nên `report/report.tex` (bản kỹ thuật dài) **chưa từng biên
   dịch** — bản `.docx`/`.pdf` mới là bản nộp.
 
+- **Mô hình đã huấn luyện** — [vohoangkh4ng/chinese-clip-ft-sinonom](https://huggingface.co/vohoangkh4ng/chinese-clip-ft-sinonom)
+  trên Hugging Face. Bản fp16, 172 MB; model card ghi đủ kết quả kèm khoảng tin cậy, code dùng
+  thử, 6 hạn chế, và lần ArcFace bị collapse.
+
 - **Đóng gói bài nộp** — `package_submission.py` → `submission/` gồm mã nguồn, tập đánh giá + nhãn
   người gán, checkpoint (bản fp16, 165 MB, embedding **giống hệt từng bit** bản fp32), báo cáo, và
   `MANIFEST.md` có checksum. Mô hình pretrain bên ngoài chỉ ghi định danh, không nộp kèm.

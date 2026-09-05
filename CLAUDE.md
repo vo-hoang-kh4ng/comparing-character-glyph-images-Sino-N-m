@@ -402,6 +402,11 @@ report, edit `build_report.py`; `report.tex` is now the superseded long version.
 **Nôm fonts must be in `~/.fonts`** or every Ext-B glyph renders as an empty box in the PDF — and it
 fails silently, the .docx still opens. `ensure_fonts()` copies them on every run.
 
+The trained checkpoint is published at
+<https://huggingface.co/vohoangkh4ng/chinese-clip-ft-sinonom> (fp16). `MODEL_URL` in
+`package_submission.py` points at it, so the generated `model/MODEL.md` ships a live link instead
+of the "missing link" warning.
+
 `package_submission.py` builds `submission/`. Three deliberate exclusions, all documented in the
 generated `data/DATA.md` and `model/MODEL.md`:
 
