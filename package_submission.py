@@ -42,6 +42,11 @@ SOURCE_FILES = [
     ("render_fonts.py", "Sinh cặp dương bằng render đa font"),
     ("scan_augment.py", "Mô hình suy giảm ảnh, hiệu chỉnh theo số đo"),
     ("finetune_glyph.py", "Fine-tune SupCon; nhánh ArcFace để tái lập lần sụp đổ"),
+    ("rerank.py", "Tầng xếp hạng lại bằng siêu dữ liệu ngôn ngữ học"),
+    ("evaluate_rerank.py", "Ba suite chấm tầng xếp hạng lại, tách vòng tròn khỏi trung thực"),
+    ("test_rerank.py", "Unit test cho rerank.py"),
+    ("test_evaluate_rerank.py", "Unit test cho evaluate_rerank.py"),
+    ("conftest.py", "Khai báo marker pytest"),
     ("build_report.py", "Sinh báo cáo .docx/.pdf"),
     ("package_submission.py", "Chính script này"),
     ("download_fonts.sh", "Tải 7 font Hán-Nôm tự do"),
@@ -109,6 +114,18 @@ python render_fonts.py          # ~20 phút trên 16 nhân CPU -> output/rendere
 
 Không cần `--augment`: `finetune_glyph.py` suy giảm ảnh **trực tuyến** lúc nạp dữ liệu, nên tập
 huấn luyện thật sự không bao giờ nằm trên đĩa.
+
+## Chạy test
+
+Từ thư mục `src/`:
+
+```bash
+python -m pytest -q
+```
+
+Đủ dữ liệu thì **55 test pass**. Nếu chưa đặt `final_characteristics-v2.xlsx` vào thư mục làm việc
+thì sẽ thấy **3 fail + 4 skip** — đó là các test cần bảng thuộc tính thật, không phải code hỏng.
+Đặt file đó vào rồi chạy lại là đủ 55.
 
 ## Ghi chú về rò rỉ dữ liệu
 

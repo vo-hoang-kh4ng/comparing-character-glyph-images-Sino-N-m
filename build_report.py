@@ -35,12 +35,18 @@ from docx import Document
 from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
-from docx.shared import Cm, Pt, RGBColor
+from docx.shared import Cm, Pt
 
 #: Font cho chữ Hán-Nôm. BabelStone phủ phần lớn; HanaMinB phủ Ext-B (chữ Nôm riêng).
 NOM_FONT = "BabelStone Han"
 MONO_FONT = "DejaVu Sans Mono"
 BODY_FONT = "Times New Roman"
+
+#: Hình học trang, dùng để co bảng cho vừa. A4 rộng 21 cm, lề 1,7 cm mỗi bên, khe giữa hai cột
+#: 0,7 cm. Sai mấy con số này thì bảng tràn ra ngoài và bị cắt trong PDF.
+TEXT_WIDTH_CM = 21.0 - 2 * 1.7
+COLUMN_GAP_CM = 0.7
+COLUMN_WIDTH_CM = (TEXT_WIDTH_CM - COLUMN_GAP_CM) / 2
 
 #: Đường dẫn font cần có trong ~/.fonts để LibreOffice vẽ được chữ Nôm.
 FONT_FILES = ("BabelStoneHan.ttf", "HanaMinA.otf", "HanaMinB.otf")
@@ -111,34 +117,77 @@ def rich(paragraph, text, size=None):
 
 
 class Report:
-    def __init__(self):
+    """Bố cục hai cột kiểu bài hội nghị.
+
+    ``python-docx`` không có API cho số cột, nên phải đặt thẳng ``w:num`` trên phần tử ``w:cols``
+    của mỗi section. Đổi số cột giữa chừng = chèn một section liên tục (``CONTINUOUS``) mới; đó là
+    cách duy nhất cho một bảng rộng tràn ngang cả trang rồi quay lại hai cột.
+    """
+
+    def __init__(self, columns=2):
         self.doc = Document()
         section = self.doc.sections[0]
         section.page_width, section.page_height = Cm(21.0), Cm(29.7)
-        for attr, value in (("top_margin", 2.2), ("bottom_margin", 2.2),
-                            ("left_margin", 2.2), ("right_margin", 2.2)):
+        for attr, value in (("top_margin", 2.0), ("bottom_margin", 2.0),
+                            ("left_margin", 1.7), ("right_margin", 1.7)):
             setattr(section, attr, Cm(value))
         style = self.doc.styles["Normal"]
-        style.font.name, style.font.size = BODY_FONT, Pt(11)
-        style.paragraph_format.space_after = Pt(6)
-        style.paragraph_format.line_spacing = 1.15
+        style.font.name, style.font.size = BODY_FONT, Pt(9.5)
+        style.paragraph_format.space_after = Pt(5)
+        style.paragraph_format.line_spacing = 1.05
         style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         self._num = 0
+        self.body_columns = columns
+        self._set_columns(section, 1, COLUMN_GAP_CM)   # phần đầu (tiêu đề + tóm tắt) luôn tràn ngang
+
+    @staticmethod
+    def _set_columns(section, num, gap_cm=0.7):
+        cols = section._sectPr.xpath("./w:cols")[0]
+        # Xoá mọi <w:col> con: nếu còn, Word ưu tiên bề rộng thủ công đó và bỏ qua w:num.
+        for child in list(cols):
+            cols.remove(child)
+        cols.set(qn("w:num"), str(num))
+        cols.set(qn("w:space"), str(int(gap_cm * 567)))
+
+    def columns(self, num):
+        """Chuyển sang bố cục `num` cột kể từ đây."""
+        self._set_columns(self.doc.add_section(WD_SECTION.CONTINUOUS), num, COLUMN_GAP_CM)
+
+    def body(self):
+        """Về lại số cột của thân bài."""
+        self.columns(self.body_columns)
 
     def title(self, text, subtitle=None, authors=None):
         p = self.doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(4)
-        _style_run(p.add_run(text), bold=True, size=17)
+        p.paragraph_format.space_after = Pt(3)
+        _style_run(p.add_run(text), bold=True, size=16)
         if subtitle:
             p = self.doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            _style_run(p.add_run(subtitle), size=12, italic=True)
+            p.paragraph_format.space_after = Pt(6)
+            _style_run(p.add_run(subtitle), size=11, italic=True)
         if authors:
             p = self.doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_after = Pt(14)
-            _style_run(p.add_run(authors), size=10.5)
+            p.paragraph_format.space_after = Pt(10)
+            _style_run(p.add_run(authors), size=9.5)
+
+    def abstract(self, text, keywords=None, indent_cm=1.4):
+        """Tóm tắt thụt lề hai bên, tràn ngang trang — quy ước của bài hội nghị."""
+        p = self.doc.add_paragraph()
+        p.paragraph_format.left_indent = Cm(indent_cm)
+        p.paragraph_format.right_indent = Cm(indent_cm)
+        p.paragraph_format.space_after = Pt(4)
+        _style_run(p.add_run("Tóm tắt—"), bold=True, italic=True, size=9)
+        rich(p, text, size=9)
+        if keywords:
+            k = self.doc.add_paragraph()
+            k.paragraph_format.left_indent = Cm(indent_cm)
+            k.paragraph_format.right_indent = Cm(indent_cm)
+            k.paragraph_format.space_after = Pt(12)
+            _style_run(k.add_run("Từ khoá—"), bold=True, italic=True, size=9)
+            _style_run(k.add_run(keywords), italic=True, size=9)
 
     def h(self, text, level=1):
         # Mỗi tiêu đề mở một danh sách đánh số mới. Style "List Number" của Word dùng chung một
@@ -149,7 +198,7 @@ class Report:
         p.paragraph_format.space_before = Pt(14 if level == 1 else 10)
         p.paragraph_format.space_after = Pt(4)
         p.paragraph_format.keep_with_next = True
-        _style_run(p.add_run(text), bold=True, size=13.5 if level == 1 else 11.5)
+        _style_run(p.add_run(text), bold=True, size=10.5 if level == 1 else 9.8)
 
     def p(self, text, size=None):
         rich(self.doc.add_paragraph(), text, size)
@@ -179,28 +228,48 @@ class Report:
                 p.add_run().add_break()
             _style_run(p.add_run(line), mono=True, size=8.5)
 
-    def table(self, header, rows, caption=None, widths=None):
+    def table(self, header, rows, caption=None, widths=None, wide=False):
+        """`wide=True` cho bảng tràn ngang cả trang rồi tự quay lại thân bài.
+
+        Bảng 6-7 cột không đọc được trong một cột rộng 8 cm; đó là lý do có tham số này chứ không
+        phải để trang trí.
+        """
+        if wide:
+            self.columns(1)
         if caption:
             p = self.doc.add_paragraph()
             p.paragraph_format.space_before = Pt(8)
             p.paragraph_format.space_after = Pt(3)
             p.paragraph_format.keep_with_next = True
-            _style_run(p.add_run(caption), italic=True, size=10)
+            _style_run(p.add_run(caption), italic=True, size=8.5)
         table = self.doc.add_table(rows=1, cols=len(header))
         table.style = "Table Grid"
         for cell, text in zip(table.rows[0].cells, header):
             cell.paragraphs[0].paragraph_format.space_after = Pt(2)
-            rich(cell.paragraphs[0], f"**{text}**", size=10)
+            rich(cell.paragraphs[0], f"**{text}**", size=8.5)
         for row in rows:
             cells = table.add_row().cells
             for cell, text in zip(cells, row):
                 cell.paragraphs[0].paragraph_format.space_after = Pt(2)
-                rich(cell.paragraphs[0], str(text), size=10)
+                rich(cell.paragraphs[0], str(text), size=8.5)
+        # Co bề rộng cột cho vừa khung chứa. Không có bước này thì bảng khai báo rộng hơn cột sẽ bị
+        # CẮT MẤT cột cuối trong PDF — hỏng âm thầm, .docx mở ra vẫn thấy đủ.
         if widths:
+            avail = TEXT_WIDTH_CM if wide else COLUMN_WIDTH_CM
+            scale = avail / sum(widths)
+            table.autofit = False
+            scaled = [Cm(w * scale) for w in widths]
+            # Phải set CẢ ``w:tblGrid`` (qua table.columns) lẫn bề rộng từng ô. Chỉ set ô thì
+            # ``tblW`` vẫn là "auto" và LibreOffice dựng bảng theo tblGrid cũ — rộng cả trang, nên
+            # cột cuối bị cắt mất khi bảng nằm trong một cột hẹp. Lỗi này im lặng: mở .docx vẫn đủ.
+            for column, width in zip(table.columns, scaled):
+                column.width = width
             for row in table.rows:
-                for cell, width in zip(row.cells, widths):
-                    cell.width = Cm(width)
+                for cell, width in zip(row.cells, scaled):
+                    cell.width = width
         self.doc.add_paragraph().paragraph_format.space_after = Pt(2)
+        if wide:
+            self.body()
         return table
 
     def image(self, path, width_cm, caption=None):
@@ -221,6 +290,27 @@ class Report:
         self.doc.save(path)
 
 
+#: Chỉ liệt kê những tài liệu nhóm thực sự dùng và **kiểm được thông tin thư mục**. Các bộ dữ liệu
+#: thư pháp nêu ở mục 9 (MCCD, NomNaOCR, IHR-NomDB) cố ý KHÔNG đưa vào đây: nhóm mới đọc mô tả chứ
+#: chưa đối chiếu bản gốc, và một mục tham khảo bịa thông tin còn tệ hơn là thiếu.
+REFERENCES = [
+    "A. Yang và cộng sự, \"Chinese CLIP: Contrastive Vision-Language Pretraining in Chinese\", "
+    "arXiv:2211.01335, 2022.",
+    "M. Oquab và cộng sự, \"DINOv2: Learning Robust Visual Features without Supervision\", "
+    "arXiv:2304.07193, 2023.",
+    "K. He, X. Zhang, S. Ren và J. Sun, \"Deep Residual Learning for Image Recognition\", CVPR, 2016.",
+    "P. Khosla và cộng sự, \"Supervised Contrastive Learning\", NeurIPS, 2020.",
+    "J. Deng, J. Guo, N. Xue và S. Zafeiriou, \"ArcFace: Additive Angular Margin Loss for Deep Face "
+    "Recognition\", CVPR, 2019.",
+    "J. Johnson, M. Douze và H. Jégou, \"Billion-scale similarity search with GPUs\", "
+    "IEEE Transactions on Big Data, 2019.",
+    "Y. A. Malkov và D. A. Yashunin, \"Efficient and robust approximate nearest neighbor search "
+    "using Hierarchical Navigable Small World graphs\", IEEE TPAMI, 2020.",
+    "E. B. Wilson, \"Probable Inference, the Law of Succession, and Statistical Inference\", "
+    "Journal of the American Statistical Association, 1927.",
+]
+
+
 # --- nội dung --------------------------------------------------------------------------------
 #
 # MỌI CON SỐ dưới đây đến từ các lệnh ở Phụ lục A. Không có số nào ước lượng bằng tay. Nếu sửa code
@@ -228,27 +318,30 @@ class Report:
 
 def build(rp):
     rp.title(
-        "Tìm kiếm ảnh ký tự Hán-Nôm tương đồng",
-        "Từ histogram tới embedding, và fine-tune bằng cặp dương sinh từ font",
-        "Đồ án môn học · mã nguồn, dữ liệu và mô hình kèm theo · xem Phụ lục A để tái lập")
+        "Tìm kiếm ảnh ký tự Hán-Nôm tương đồng bằng học tương phản trên cặp dương sinh từ font",
+        "Đồ án môn học — mã nguồn, dữ liệu, mô hình và lệnh tái lập kèm theo")
 
-    # ---------------------------------------------------------------- Tóm tắt
-    rp.h("Tóm tắt")
-    rp.p(
+    rp.abstract(
         "Báo cáo trình bày một hệ thống tìm kiếm ảnh ký tự Hán-Nôm tương đồng trên corpus 26.044 "
         "glyph, và quá trình cải thiện nó qua ba bước đo được. **Bước một**: thay bộ trích đặc trưng "
-        "ResNet18 của bản gốc bằng tháp ảnh Chinese-CLIP, nâng `radical@k` từ 0,2316 lên 0,5361 "
+        "ResNet18 của bản gốc bằng tháp ảnh Chinese-CLIP, nâng radical@k từ 0,2316 lên 0,5361 "
         "(2,31 lần). **Bước hai**: xây dựng phép đánh giá trên ảnh scan thật thay vì chỉ dựa vào "
         "chỉ số proxy — 59 ảnh viết tay, nhãn giải mã từ tên file rồi được người đọc kiểm lại; trên "
-        "tập này mô hình tốt nhất chỉ đạt `hit@1` = 0,0847, thấp hơn hẳn mức mà chỉ số proxy gợi ý. "
+        "tập này mô hình tốt nhất chỉ đạt hit@1 = 0,0847, thấp hơn hẳn mức mà chỉ số proxy gợi ý. "
         "**Bước ba**: fine-tune bằng học tương phản có giám sát (SupCon) trên 141.981 ảnh render đa "
-        "font, nhãn là mã Unicode, đưa `hit@1` trên chính 59 ảnh scan đó lên **0,5932** — hai khoảng "
+        "font, nhãn là mã Unicode, đưa hit@1 trên chính 59 ảnh scan đó lên **0,5932** — hai khoảng "
         "tin cậy 95% rời hẳn nhau. Trên bài toán phụ (xếp hạng trong nhóm ký tự cùng âm Quốc Ngữ), "
         "độ chính xác top-1 tăng từ 0,4746 lên **0,8136**. Các lớp Unicode bị giữ lại hoàn toàn "
         "ngoài tập huấn luyện đạt kết quả bằng đúng các lớp đã huấn luyện (0,9939 so với 0,9954), "
-        "nên phần cải thiện không đến từ việc ghi nhớ. Báo cáo cũng ghi lại đầy đủ các kết quả âm — "
-        "trong đó có một lần huấn luyện bị sụp đổ biểu diễn (representation collapse) — vì nguyên "
-        "nhân của chúng có tính lặp lại.")
+        "nên phần cải thiện không đến từ việc ghi nhớ. Chúng tôi cũng khảo sát một tầng xếp hạng lại "
+        "bằng siêu dữ liệu ngôn ngữ học và báo cáo nó như một **kết quả âm**: metadata có trần cao "
+        "(oracle +17,5 điểm) nhưng suy ra được siêu dữ liệu của ảnh truy vấn mới là chỗ nghẽn. "
+        "Báo cáo giữ lại đầy đủ các kết quả âm — trong đó có một lần huấn luyện bị sụp đổ biểu diễn "
+        "— vì nguyên nhân của chúng có tính lặp lại.",
+        keywords="truy hồi ảnh, chữ Nôm, học tương phản, SupCon, Chinese-CLIP, xếp hạng lại, "
+                 "kết quả âm")
+
+    rp.body()
 
     # ---------------------------------------------------------------- 1
     rp.h("1. Bài toán")
@@ -288,7 +381,7 @@ def build(rp):
          ["`test_images/`", "59 ảnh scan", "**Tập đánh giá thật.** Chữ viết tay, kích thước không đồng nhất (88×96 … 178×162)."],
          ["`output/rendered/`", "131.604 ảnh", "Sinh ra để huấn luyện: mỗi ký tự render qua tối đa 7 font."]],
         caption="Bảng 1. Các tập dữ liệu. Ba tập đầu là đầu vào cho trước; hai tập sau do nhóm tạo hoặc gán nhãn.",
-        widths=[5.0, 3.4, 8.2])
+        widths=[5.0, 3.4, 8.2], wide=True)
     rp.p(
         "Đặc điểm quyết định toàn bộ thiết kế: **corpus chỉ có một ảnh cho mỗi ký tự.** Học metric "
         "cần cặp dương — hai ảnh khác nhau của cùng một lớp — nên trong dữ liệu gốc *không tồn tại "
@@ -345,7 +438,7 @@ def build(rp):
          ["noise", "10,1", "2,7", "3,77×", "hạt nhiễu giấy và cảm biến"],
          ["bg", "254,0", "255,0", "≈1×", "nền giấy hơi ngà"]],
         caption="Bảng 2. Khoảng cách đo được giữa scan thật và ảnh render. Hàm suy giảm mô phỏng đúng sáu trục này.",
-        widths=[2.6, 2.4, 2.2, 1.8, 7.6])
+        widths=[2.6, 2.4, 2.2, 1.8, 7.6], wide=True)
     rp.p(
         "Hàm `degrade()` mô phỏng sáu trục đó theo thứ tự vật lý của một trang scan: tay viết → mực "
         "loang trên giấy → mất phân giải khi chụp → nhoè quang học → giấy ngà và tương phản kém → "
@@ -436,7 +529,7 @@ def build(rp):
          ["`chinese-clip-huge`", "fp16", "1024", "0,5147", "2,6547", "**0,2144**", "283"],
          ["`dinov2`", "fp32", "1536", "0,3081", "**2,3397**", "0,1251", "306"]],
         caption="Bảng 4. Toàn bộ corpus 26.044 glyph, top-K = 20. Đậm là tốt nhất mỗi cột.",
-        widths=[3.9, 1.5, 1.5, 2.2, 2.6, 2.6, 2.3])
+        widths=[3.9, 1.5, 1.5, 2.2, 2.6, 2.6, 2.3], wide=True)
     rp.p(
         "Chinese-CLIP thắng với biên độ lớn: `radical@k` gấp **2,31 lần** bản gốc và `ids_jaccard` "
         "gấp 2,05 lần, mà gần như không tốn thêm thời gian (354 so với 358 ảnh/giây). Giả thuyết "
@@ -481,7 +574,7 @@ def build(rp):
          ["**`chinese-clip-ft`** (fine-tune)", "**0,5932**", "**0,7966**", "**0,8644**", "**0,6691**",
           "**[0,457; 0,719]**"]],
         caption="Bảng 5. Phần 1 — tìm trên toàn bộ 26.044 ký tự, n = 59 ảnh scan thật.",
-        widths=[5.2, 1.9, 1.9, 1.9, 1.9, 3.8])
+        widths=[5.2, 1.9, 1.9, 1.9, 1.9, 3.8], wide=True)
     rp.p(
         "**Hai khoảng tin cậy rời hẳn nhau.** Đây là so sánh duy nhất trong đồ án mà n = 59 đỡ nổi "
         "một kết luận — và không phải vì mẫu lớn hơn, mà vì hiệu ứng đủ lớn: 35/59 so với 5/59, hơn "
@@ -501,7 +594,7 @@ def build(rp):
          ["`embedding` zero-shot (large)", "28/59 = 0,4746", "0,6566", "[0,343; 0,609]"],
          ["**`embedding` fine-tune**", "**48/59 = 0,8136**", "**0,8983**", "**[0,691; 0,903]**"]],
         caption="Bảng 6. Phần 2 — xếp hạng trong nhóm cùng âm Quốc Ngữ, n = 59.",
-        widths=[5.6, 3.6, 2.4, 3.4])
+        widths=[5.6, 3.6, 2.4, 3.4], wide=True)
     rp.p(
         "Phép thử độ nhạy trên 53 nhãn `high` cho 45/53 = 0,8491 so với histogram 0,4717, nên kết "
         "luận không phụ thuộc vào sáu nhãn `med`/`low` còn lại.")
@@ -592,8 +685,89 @@ def build(rp):
         "chứng minh. Ghi lại điều này vì nó là thước đo trực tiếp cho việc một bảng số ở n = 59 "
         "nhạy tới mức nào với đúng một nhãn.")
 
-    # ---------------------------------------------------------------- 7
-    rp.h("7. Hạn chế")
+    # ---------------------------------------------------------------- 7 rerank
+    rp.h("7. Xếp hạng lại bằng siêu dữ liệu — một kết quả âm")
+    rp.p(
+        "Ba cột siêu dữ liệu ngôn ngữ học (`RADICAL`, `STROKE_NUM`, `SHAPE_MORPH`) mô tả những "
+        "thuộc tính mà mô hình ảnh không nhìn thấy. Câu hỏi tự nhiên: dùng chúng để **xếp hạng lại** "
+        "danh sách ứng viên mà tầng ảnh trả về thì có tốt hơn không? Chúng tôi cài đặt tầng đó và "
+        "trả lời bằng số. Câu trả lời là **chưa**, và lý do cụ thể hơn nhiều so với \"không hiệu "
+        "quả\".")
+
+    rp.h("7.1. Vì sao không thể chấm bằng chỉ số cũ", 2)
+    rp.p(
+        "Ba chỉ số proxy ở mục 4 được suy ra từ **đúng ba cột** mà tầng xếp hạng lại dùng làm đặc "
+        "trưng. Chấm nó bằng `radical@k` là vòng tròn: điểm số sẽ leo về trần 0,978 mà không chứng "
+        "minh được gì, vì mô hình được đưa sẵn đáp án. Vì vậy phép đo trung thực phải dùng nhãn "
+        "**độc lập** với ba cột đó — ở đây là mã Unicode của chính ký tự, trên tập ảnh render "
+        "(n = 600, khoảng tin cậy khoảng ±3,5 điểm, đủ hẹp để phân giải mức cải thiện đáng quan tâm).")
+
+    rp.h("7.2. Bốn cấu hình, và điều mỗi cấu hình trả lời", 2)
+    rp.table(
+        ["Cấu hình", "hit@1", "KTC 95%", "MRR"],
+        [["Tầng 1, không xếp hạng lại", "0,7467", "[0,710; 0,780]", "0,8193"],
+         ["Xếp hạng lại, **oracle** (cố tình gian lận)", "**0,9217**", "[0,897; 0,941]", "0,9446"],
+         ["Xếp hạng lại, thật", "0,7233", "[0,686; 0,758]", "0,8052"],
+         ["Xếp hạng lại, **không chuẩn hoá tín hiệu**", "0,1883", "[0,159; 0,222]", "0,2447"]],
+        caption="Bảng 9. Xếp hạng lại trên 600 ảnh render, tầng 1 là chinese-clip-large. Cấu hình "
+                "oracle đọc trộm siêu dữ liệu thật của truy vấn — nó là chẩn đoán, không phải kết quả.",
+        widths=[6.4, 2.6, 3.4, 2.4], wide=True)
+    rp.p("Ba điều rút ra, theo thứ tự quan trọng:")
+    rp.bullet(
+        "**Chuẩn hoá tín hiệu trước khi trộn là bắt buộc.** Trộn điểm thô làm mất 56 điểm hit@1 "
+        "(0,7467 → 0,1883). Lý do: với trọng số mặc định, một ứng viên phải thắng về độ giống ảnh "
+        "hơn 0,364 cosine mới bù nổi một lần lệch bộ thủ, mà khoảng cách cosine trong top-20 không "
+        "bao giờ rộng đến thế. Trộn thô vì vậy biến phép xếp hạng thành **sắp xếp từ điển** — bộ "
+        "thủ trước, rồi số nét, rồi hình dạng — đẩy mô hình ảnh xuống làm tiêu chí phá hoà. Đây là "
+        "một lỗi thật, và nó chỉ lộ ra khi có phép đo không vòng tròn.")
+    rp.bullet(
+        "**Siêu dữ liệu có trần cao.** Cấu hình oracle được +17,5 điểm. Nghĩa là nếu biết đúng bộ "
+        "thủ, số nét và phân rã hình dạng của ảnh truy vấn thì ý tưởng này thắng rõ rệt. Vấn đề "
+        "không nằm ở ý tưởng.")
+    rp.bullet(
+        "**Nhưng trần đó chưa với tới được.** Cấu hình thật đạt 0,7233, tức **hơi thấp hơn** mốc "
+        "không xếp hạng lại. Toàn bộ khoảng cách 17,5 điểm giữa oracle và thực tế nằm ở một bước "
+        "duy nhất: suy ra siêu dữ liệu của ảnh truy vấn.")
+
+    rp.h("7.3. Chỗ nghẽn, định lượng", 2)
+    rp.p(
+        "Ảnh truy vấn là một bản scan chưa biết là chữ gì, nên không tra được siêu dữ liệu của nó. "
+        "Cách thay thế là **bỏ phiếu từ láng giềng**: lấy top-50 ký tự giống nhất trên toàn corpus "
+        "rồi lấy bộ thủ chiếm đa số. Đo trực tiếp độ chính xác của bước này:")
+    rp.table(
+        ["Cách đoán bộ thủ của ảnh truy vấn", "Độ chính xác"],
+        [["Đoán đều tay giữa 214 bộ", "0,0047"],
+         # Ghi kèm âm đọc: 〔口〕 vốn là một hình vuông, không thêm chú thì người đọc tưởng font hỏng.
+         ["Luôn đoán bộ phổ biến nhất, bộ 〔口〕 (khẩu)", "0,0489"],
+         ["Bỏ phiếu từ láng giềng, tầng 1 = `chinese-clip-large`", "0,1186"],
+         ["Bỏ phiếu từ láng giềng, tầng 1 = **`chinese-clip-ft`**", "**0,6610**"]],
+        caption="Bảng 10. Độ chính xác suy ra bộ thủ của ảnh truy vấn, đo trên 59 scan thật.",
+        widths=[9.4, 3.2])
+    rp.p(
+        "Với tầng 1 zero-shot, phép bỏ phiếu chỉ đúng 11,86% — hơn đoán mò 2,4 lần, nhưng **sai "
+        "88% số lần**, trong khi bộ thủ chiếm trọng số 0,20 trong điểm tổng. Tầng xếp hạng lại vì "
+        "vậy đang được nuôi bằng nhiễu.")
+    rp.p(
+        "Nguyên nhân có tính cơ chế chứ không phải lỗi cài đặt: phép bỏ phiếu lấy từ láng giềng của "
+        "tầng 1, mà tầng 1 zero-shot chỉ đúng 8,47% trên scan thật (Bảng 5), nên đa số phiếu là của "
+        "chữ sai. **Thay tầng 1 bằng mô hình đã fine-tune thì độ chính xác nhảy lên 0,6610 — gấp "
+        "5,6 lần.** Mắt xích yếu không nằm ở thiết kế của phép suy luận mà ở chất lượng của tầng "
+        "đứng trước nó.")
+    rp.p(
+        "Trên 59 scan thật, xếp hạng lại đưa Phần 2 từ 48/59 lên 50/59 với tầng 1 fine-tune. Đúng "
+        "hai ảnh — nằm gọn trong khoảng nhiễu ở n = 59, nên **không được đọc là cải thiện**. Cơ chế "
+        "đã chạy đúng, nhưng tập test hiện có không đủ để chứng minh.")
+
+    rp.h("7.4. Một cảnh báo về phép đo", 2)
+    rp.p(
+        "Tập ảnh render **không** dùng để đánh giá `chinese-clip-ft` được, vì chính chúng là dữ "
+        "liệu huấn luyện của mô hình đó. Chúng tôi đã thử cứu bằng cách chỉ lấy 2.604 lớp Unicode "
+        "held-out, rồi thử tiếp trên bản đã suy giảm — cả hai đều bão hoà trên 0,98. Nghĩa là phép "
+        "đo không vòng tròn ở mục 7.1 chỉ dùng được cho mô hình zero-shot; với mô hình đã fine-tune "
+        "thì chỉ còn 59 ảnh scan thật, và ta quay lại đúng nút thắt cỡ mẫu ở mục 8.")
+
+    # ---------------------------------------------------------------- 8
+    rp.h("8. Hạn chế")
     rp.bullet(
         "**n = 59 là toàn bộ dữ liệu scan hiện có**, và là nút thắt lớn nhất. Mọi so sánh trong đồ "
         "án trừ mục 5.4 đều nằm trong khoảng nhiễu. Cần n ≈ 150 để khoảng tin cậy xuống ±8 điểm.")
@@ -607,6 +781,11 @@ def build(rp):
         "Nhãn Phần 2 do **so hình** mà ra, không phải do chuyên gia Hán-Nôm đọc. Còn 6/59 dòng ở "
         "mức `med`/`low`.")
     rp.bullet(
+        "**Tầng xếp hạng lại chưa được kiểm chứng ở cấu hình tốt nhất.** Bảng 9 đo với tầng 1 "
+        "zero-shot; khi tầng 1 là mô hình fine-tune thì bước suy ra bộ thủ tốt lên 5,6 lần, nhưng "
+        "chưa ai chạy lại đủ bốn cấu hình trên tầng 1 đó. Kết luận \"chưa dùng được\" ở mục 7 vì "
+        "thế chỉ đúng cho cấu hình đã đo.")
+    rp.bullet(
         "Ảnh query là chữ viết tay lối hành thư còn corpus là khải thư in — mọi con số đo trên đúng "
         "một cặp phân phối này, chưa nói được gì về các lối viết khác.")
     rp.bullet(
@@ -614,7 +793,7 @@ def build(rp):
         "không được suy diễn cho mốc một triệu.")
 
     # ---------------------------------------------------------------- 8
-    rp.h("8. Kết luận và hướng tiếp theo")
+    rp.h("9. Kết luận và hướng tiếp theo")
     rp.bullet(
         "**Chuyển sang Chinese-CLIP.** Hơn baseline ResNet18 2,31 lần ở `radical@k` với chi phí "
         "gần như bằng không. Không scale tiếp lên ViT-H: đường cong đã quay đầu.", numbered=True)
@@ -626,13 +805,30 @@ def build(rp):
         "**Giữ tìm kiếm chính xác** `IndexFlatIP` cho tới khi corpus vượt khoảng 300.000 ký tự.",
         numbered=True)
     rp.bullet(
+        "**Xếp hạng lại bằng siêu dữ liệu chưa dùng được, nhưng biết rõ vì sao.** Oracle cho thấy "
+        "còn +17,5 điểm dư địa; chỗ nghẽn là bước suy ra bộ thủ của ảnh truy vấn, hiện đúng 11,9% "
+        "với tầng 1 zero-shot và 66,1% với tầng 1 fine-tune. Đo lại toàn bộ trên tầng 1 fine-tune "
+        "là việc rẻ nhất còn chưa làm (mục 7).", numbered=True)
+    rp.bullet(
         "**Việc tiếp theo, theo thứ tự chi phí.** (a) *Hard negative mining*: hàm mất mát hiện rơi "
         "về 0,0068 chỉ sau 400 bước vì 24 lớp lấy ngẫu nhiên từ 23.440 thì phân biệt quá dễ — phải "
         "nhồi vào cùng batch những ký tự trông giống nhau thì mới còn tín hiệu để học. (b) Scan "
         "thêm ảnh thật để gỡ nút thắt n = 59. (c) Bổ sung dữ liệu thư pháp bút lông thật (MCCD, "
         "NomNaOCR) — thứ mà render font về nguyên tắc không sinh ra được.", numbered=True)
 
+    # ---------------------------------------------------------------- Tham khảo
+    rp.h("Tài liệu tham khảo")
+    for i, ref in enumerate(REFERENCES, 1):
+        p = rp.doc.add_paragraph()
+        p.paragraph_format.left_indent = Cm(0.7)
+        p.paragraph_format.first_line_indent = Cm(-0.7)
+        p.paragraph_format.space_after = Pt(2)
+        p.paragraph_format.line_spacing = 1.0
+        rich(p, f"[{i}] {ref}", size=8.5)
+
     # ---------------------------------------------------------------- Phụ lục
+    # Phụ lục về 1 cột: các dòng lệnh dài không xuống dòng đẹp trong cột rộng 8 cm.
+    rp.columns(1)
     rp.pagebreak()
     rp.h("Phụ lục A. Tái lập toàn bộ số liệu")
     rp.p(
@@ -698,6 +894,21 @@ def build(rp):
         "# sinh lại phiếu gán nhãn (query + TOÀN BỘ ứng viên, kèm mã Unicode)",
         ".venv/bin/python evaluate_test_images.py --sheets",
     ])
+    rp.p("**Mục 7 — xếp hạng lại bằng siêu dữ liệu.** Bốn cấu hình của Bảng 9, theo thứ tự.")
+    rp.code([
+        "# 55 unit test của tầng xếp hạng lại",
+        ".venv/bin/python -m pytest -q",
+        "",
+        "S=\"--suite render --sample 600 --backend chinese-clip-large --dtype fp16\"",
+        ".venv/bin/python evaluate_rerank.py $S --no-rerank      # tầng 1",
+        ".venv/bin/python evaluate_rerank.py $S --oracle-meta    # oracle (chẩn đoán)",
+        ".venv/bin/python evaluate_rerank.py $S                  # thật",
+        ".venv/bin/python evaluate_rerank.py $S --normalize none # không chuẩn hoá",
+        "",
+        "# Bảng 10: độ chính xác suy ra bộ thủ, in kèm ở cuối suite scans",
+        ".venv/bin/python evaluate_rerank.py --suite scans --backend chinese-clip-large",
+        ".venv/bin/python evaluate_rerank.py --suite scans --backend chinese-clip-ft",
+    ])
     rp.p(
         "Nhật ký huấn luyện đầy đủ, gồm cả lần ArcFace sụp đổ ở mục 6.3, nằm trong "
         "`output/finetune/train.log`. `BENCHMARK.md` giữ bản dài của mọi bảng phụ mà báo cáo này "
@@ -714,8 +925,8 @@ def build(rp):
          ["`report/`", "Báo cáo `.docx` và `.pdf`, cùng script sinh ra chúng."],
          ["`BENCHMARK.md`", "Bản dài: mọi bảng, mọi lần chạy, mọi kết quả âm."],
          ["`README.md`", "Hướng dẫn chạy nhanh."]],
-        caption="Bảng 9. Cấu trúc gói nộp.",
-        widths=[5.2, 11.4])
+        caption="Bảng 11. Cấu trúc gói nộp.",
+        widths=[5.2, 11.4], wide=True)
     rp.table(
         ["Script", "Vai trò"],
         [["`feature_extractors.py`", "Sáu backend trích đặc trưng sau một giao diện chung."],
@@ -728,9 +939,12 @@ def build(rp):
          ["`render_fonts.py`", "Sinh cặp dương bằng render đa font (mục 3.3)."],
          ["`scan_augment.py`", "Mô hình suy giảm ảnh, đã hiệu chỉnh theo số đo (Bảng 2)."],
          ["`finetune_glyph.py`", "Fine-tune SupCon (mục 3.4), kèm nhánh ArcFace để tái lập mục 6.3."],
+         ["`rerank.py`", "Tầng xếp hạng lại bằng siêu dữ liệu ngôn ngữ học (mục 7)."],
+         ["`evaluate_rerank.py`", "Ba suite đánh giá tầng xếp hạng lại, tách rõ vòng tròn và trung thực."],
+         ["`test_rerank.py`, `test_evaluate_rerank.py`", "55 unit test."],
          ["`build_report.py`", "Sinh chính báo cáo này."]],
-        caption="Bảng 10. Mã nguồn do nhóm viết.",
-        widths=[5.6, 11.0])
+        caption="Bảng 12. Mã nguồn do nhóm viết.",
+        widths=[5.6, 11.0], wide=True)
 
     rp.h("Tài liệu và tài nguyên ngoài")
     rp.p(
