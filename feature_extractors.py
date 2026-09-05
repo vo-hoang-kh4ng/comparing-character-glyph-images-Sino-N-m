@@ -18,7 +18,14 @@ resnet18-gray  Same architecture, but the 1-channel conv is seeded by summing th
 chinese-clip   OFA-Sys/chinese-clip-vit-base-patch16 image tower. Pretrained on Chinese
                image-text pairs, so its prior is much closer to Han glyphs than ImageNet.
 dinov2         facebook/dinov2-base. Self-supervised ViT, strong general-purpose visual features.
+chinese-clip-ft  ``chinese-clip`` after ``finetune_glyph.py``. Same architecture and same embedding
+               width, so every downstream script works unchanged -- only the weights differ. The
+               checkpoint path comes from ``$GLYPH_FT_CKPT`` (default ``output/finetune/best.pt``);
+               loading fails loudly rather than silently falling back to the pretrained weights,
+               because a silent fallback would report zero-shot numbers under a finetuned name.
 """
+
+import os
 
 import numpy as np
 import torch
@@ -31,6 +38,7 @@ BACKENDS = (
     "chinese-clip",
     "chinese-clip-large",
     "chinese-clip-huge",
+    "chinese-clip-ft",
     "dinov2",
 )
 
@@ -38,12 +46,18 @@ _HF_MODEL_IDS = {
     "chinese-clip": "OFA-Sys/chinese-clip-vit-base-patch16",
     "chinese-clip-large": "OFA-Sys/chinese-clip-vit-large-patch14",
     "chinese-clip-huge": "OFA-Sys/chinese-clip-vit-huge-patch14",
+    # Cùng kiến trúc ViT-B/16 với ``chinese-clip``; khác ở chỗ trọng số được nạp đè bằng checkpoint
+    # của ``finetune_glyph.py``. Giữ nguyên ``visual_projection`` nên hình dạng khớp tuyệt đối.
+    "chinese-clip-ft": "OFA-Sys/chinese-clip-vit-base-patch16",
     "dinov2": "facebook/dinov2-base",
 }
 
 #: ``--dtype`` values. fp16 halves weight memory, which is what makes ViT-H fit alongside the vLLM
 #: workers; it only affects the HuggingFace backends (the ResNets are cheap enough to leave alone).
 DTYPES = {"fp32": torch.float32, "fp16": torch.float16}
+
+#: Checkpoint mặc định cho backend ``chinese-clip-ft``; ghi đè bằng biến môi trường ``GLYPH_FT_CKPT``.
+FT_CHECKPOINT = "output/finetune/best.pt"
 
 
 def _from_pretrained(cls, model_id, dtype):
@@ -159,6 +173,20 @@ class ChineseClipExtractor(BaseExtractor):
         # full RoBERTa that would otherwise be copied to the GPU and never used -- ~1.3 GB wasted on
         # ViT-H. Drop it while the model is still on CPU so only the vision half is transferred.
         del model.text_model, model.text_projection
+        if backend.endswith("-ft"):
+            path = os.environ.get("GLYPH_FT_CKPT", FT_CHECKPOINT)
+            if not os.path.exists(path):
+                raise SystemExit(f"Chưa có checkpoint {path} -- chạy finetune_glyph.py trước, "
+                                 "hoặc trỏ $GLYPH_FT_CKPT vào file khác.")
+            state = torch.load(path, map_location="cpu")["model"]
+            # strict=False vì checkpoint còn giữ text_model/logit_scale mà ở đây đã xoá; nhưng phải
+            # kiểm tay là các khoá vision ĐỀU khớp, không thì nạp hụt mà vẫn im lặng.
+            missing, _ = model.load_state_dict(state, strict=False)
+            missing = [k for k in missing if not k.startswith(("text_model", "text_projection"))]
+            if missing:
+                raise SystemExit(f"Checkpoint thiếu {len(missing)} khoá vision, vd {missing[:3]}")
+            model = model.to(self.dtype)
+            print(f"[chinese-clip-ft] nạp {path}")
         self.model = model.to(self.device).eval()
         self.dim = self.model.config.projection_dim
 

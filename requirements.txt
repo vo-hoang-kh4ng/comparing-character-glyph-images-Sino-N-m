@@ -9,3 +9,5 @@ faiss-cpu
 opencv-python
 scikit-learn
 scipy
+fonttools        # đọc bảng cmap để biết font phủ ký tự nào (render_fonts.py)
+python-docx      # sinh báo cáo .docx (build_report.py)
