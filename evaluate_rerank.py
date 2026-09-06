@@ -158,12 +158,17 @@ def suite_proxy(args):
             print(f"  {i + 1}/{len(df)}", flush=True)
     after = quality_metrics(reranked, radicals, strokes, components)
 
-    print(f"\n{'metric':<16s} {'stage 1':>10s} {'reranked':>10s} {'change':>10s}")
+    # 24 = len("ids_jaccard@k [CIRCULAR]"), the widest label this loop can print. At the old width
+    # of 16 every flagged row overflowed and shunted the numbers right, so the one table whose
+    # whole job is to be read sceptically was the one that came out misaligned.
+    label_width = max(len(m) + len(" [CIRCULAR]") for m in
+                      ("radical@k", "stroke_mae@k", "ids_jaccard@k"))
+    print(f"\n{'metric':<{label_width}s} {'stage 1':>10s} {'reranked':>10s} {'change':>10s}")
     rows = []
     for metric in ("radical@k", "stroke_mae@k", "ids_jaccard@k"):
         a, b = before[metric], after[metric]
         flag = " [CIRCULAR]" if metric in tainted else ""
-        print(f"{metric + flag:<16s} {a:10.4f} {b:10.4f} {b - a:+10.4f}")
+        print(f"{metric + flag:<{label_width}s} {a:10.4f} {b:10.4f} {b - a:+10.4f}")
         rows.append({"metric": metric + flag, "stage1": round(a, 4),
                      "reranked": round(b, 4), "change": round(b - a, 4)})
 
