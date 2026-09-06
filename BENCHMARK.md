@@ -25,6 +25,14 @@ bash download_fonts.sh                    # tải font CJK vào ./fonts (~200MB,
 
 # Phần 2 (mục 8) — so sánh trực tiếp hai phương pháp trên cùng một query
 .venv/bin/python search_use_QuocNgu_mapping.py --word ta --image ./images/54B1.jpg --method both
+
+# mục 15 — xếp hạng lại bằng siêu dữ liệu; nhãn là mã Unicode nên không vòng tròn
+S="--suite render --sample 600 --backend chinese-clip-large --dtype fp16"
+.venv/bin/python evaluate_rerank.py $S --no-rerank      # tầng 1 đơn thuần
+.venv/bin/python evaluate_rerank.py $S --oracle-meta    # trần (chẩn đoán, không phải kết quả)
+.venv/bin/python evaluate_rerank.py $S                  # xếp hạng lại thật
+.venv/bin/python evaluate_rerank.py $S --normalize none # bản trước B2
+.venv/bin/python -m pytest -q                           # 55 test cho rerank/evaluate_rerank
 ```
 
 ---
@@ -748,6 +756,9 @@ scan viết tay ↔ bản in cùng một ký tự.
   đo trên đúng một cặp phân phối này, chưa chắc khái quát sang loại scan khác.
 - Oracle ở mục 9.2 dựa trên `SHAPE_MORPH`, vốn chỉ có ở 96,9% ký tự và bản thân cũng là nhãn do
   người biên soạn — nó là *ước lượng* trần thực tế, không phải trần chính xác.
+- Kết quả xếp hạng lại (mục 15) đo trên **render sạch**, nơi tầng 1 đã đạt 0,7467 nên còn rất ít
+  chỗ cải thiện, và **chưa chạy với tầng 1 fine-tune** — tức chưa chạy ở cấu hình duy nhất mà nó có
+  cơ hội thắng. Chi tiết ở 15.5.
 
 ## 12. Kết luận
 
@@ -781,7 +792,12 @@ scan viết tay ↔ bản in cùng một ký tự.
    scan thật, so với 0,0847 của `chinese-clip-large` zero-shot — hai CI rời hẳn nhau, và lớp chưa
    từng thấy lúc huấn luyện đạt đúng bằng lớp đã thấy (0,9939 vs 0,9954) nên không phải thuộc lòng.
    Chi tiết ở mục 14, kể cả lần ArcFace bị collapse trước đó.
-11. **Bước tiếp theo cần đánh giá bằng người.** Mức đồng thuận giữa các backend quá thấp để kết luận
+11. **Xếp hạng lại bằng siêu dữ liệu: chưa dùng được, nhưng không phải vì ý tưởng sai.** Cấu hình
+   oracle hơn tầng 1 tới +17,5 điểm, nên trần còn cao; cấu hình thật lại thấp hơn tầng 1 14/600 ảnh
+   vì bước suy ra bộ thủ của query chỉ đúng 11,86% với tầng 1 zero-shot. Con số đó lên 0,6610 khi
+   tầng 1 là mô hình fine-tune, mà cấu hình ấy **chưa được chạy** — đây là việc còn dở, không phải
+   kết luận đã chốt (mục 15).
+12. **Bước tiếp theo cần đánh giá bằng người.** Mức đồng thuận giữa các backend quá thấp để kết luận
    chỉ dựa trên proxy — và mục 9 cho thấy chính proxy cũng có trần riêng. Sau đó mới tới ensemble
    `chinese-clip-large` + `dinov2`, rồi finetune metric learning trên thành phần IDS.
 
@@ -1036,6 +1052,134 @@ theo xu hướng nào. Tín hiệu huấn luyện đã cạn: 24 lớp lấy ng�
 2. **Backbone lớn hơn** khi GPU rảnh — ViT-B/16 là ràng buộc VRAM, không phải lựa chọn.
 3. **MCCD / NomNaOCR** (mục 13.6) — render font vẫn không sinh ra được nét bút lông thật.
 
+## 15. Xếp hạng lại bằng siêu dữ liệu (`rerank.py`) — kết quả âm, kèm trần của nó
+
+Bảng `final_characteristics-v2.xlsx` còn ba cột mà toàn bộ pipeline ảnh không hề đụng tới:
+`RADICAL`, `STROKE_NUM`, `SHAPE_MORPH`. Chúng mô tả đúng những thuộc tính mà mô hình ảnh không nhìn
+thấy được. Câu hỏi: dùng chúng **xếp hạng lại** danh sách ứng viên của tầng ảnh thì có tốt hơn không?
+
+Câu trả lời là **chưa** — nhưng lý do cụ thể hơn nhiều so với "không hiệu quả", và chính cái lý do
+đó mới là phần dùng được.
+
+### 15.1 Không được chấm bằng ba chỉ số cũ
+
+`radical@k`, `stroke_mae@k`, `ids_jaccard@k` suy ra từ **đúng ba cột** mà tầng xếp hạng lại dùng làm
+đặc trưng. Chấm tầng này bằng chúng là đo nó với chính đầu vào của nó: điểm sẽ leo về trần 0,978
+(mục 9.1) mà không chứng minh được gì.
+
+Đây không phải cảnh báo suông — nó được cài thành mã. `Reranker.circularity_report()` trả về đúng
+những chỉ số bị vô hiệu bởi cấu hình hiện tại, và `evaluate_rerank.py --suite proxy` **cố tình chạy
+phép đo vòng tròn đó** rồi dán hậu tố `[CIRCULAR]` vào từng cột, kèm một sheet `Warnings` trong file
+Excel xuất ra. Suite đó là một minh hoạ, không bao giờ là một kết quả.
+
+Phép đo trung thực phải dùng nhãn **độc lập** với ba cột kia. Ở đây là **mã Unicode** của chính ký
+tự, trên tập ảnh render của mục 13 — `evaluate_rerank.py --suite render`.
+
+### 15.2 Bốn quyết định thiết kế, mỗi cái sửa một lỗi
+
+Ký hiệu B1–B4 dùng thống nhất trong `rerank.py`, `test_rerank.py` và `evaluate_rerank.py`.
+
+| | vấn đề | cách xử lý |
+|---|---|---|
+| **B1** | chấm bằng chỉ số suy ra từ chính đặc trưng đầu vào | `circularity_report()` + suite `proxy` dán nhãn `[CIRCULAR]` |
+| **B2** | trộn điểm thô biến xếp hạng thành sắp xếp từ điển | chuẩn hoá z-score **trong từng danh sách ứng viên** trước khi trộn |
+| **B3** | ảnh query chưa biết là chữ gì thì không có siêu dữ liệu | `infer_query_meta()` bỏ phiếu từ láng giềng toàn corpus; truyền `None` giờ **ném lỗi** thay vì âm thầm thành no-op |
+| **B4** | `load_corpus()` chỉ trả UNICODE/CHAR/path nên `Reranker(df)` chết vì `KeyError` | `Reranker.from_excel()` + kiểm cột, báo đúng phải dùng gì |
+
+B2 đáng nói riêng vì nó là lỗi định lượng được: với trọng số mặc định, một ứng viên phải thắng về
+cosine hơn **0,364** mới bù nổi một lần lệch bộ thủ — mà khoảng cách cosine trong top-20 không bao
+giờ rộng đến thế. Trộn thô vì vậy **không phải** một phép trộn: nó là sắp xếp từ điển bộ thủ → số
+nét → hình dạng, đẩy mô hình ảnh xuống làm tiêu chí phá hoà.
+
+### 15.3 Kết quả trên tập render (n = 600, nhãn = mã Unicode)
+
+```bash
+S="--suite render --sample 600 --backend chinese-clip-large --dtype fp16"
+.venv/bin/python evaluate_rerank.py $S --no-rerank        # tầng 1 đơn thuần
+.venv/bin/python evaluate_rerank.py $S --oracle-meta      # trần (chẩn đoán, không phải kết quả)
+.venv/bin/python evaluate_rerank.py $S                    # xếp hạng lại thật
+.venv/bin/python evaluate_rerank.py $S --normalize none   # bản trước B2
+```
+
+| cấu hình | hit@1 | KTC 95% | so với tầng 1 |
+|---|---:|---|---:|
+| tầng 1, không xếp hạng lại | 448/600 = 0,7467 | [0,710; 0,780] | — |
+| *xếp hạng lại, oracle* (**chẩn đoán**) | *553/600 = 0,9217* | *[0,897; 0,941]* | *+105 ảnh* |
+| **xếp hạng lại, thật** | **434/600 = 0,7233** | **[0,686; 0,758]** | **−14 ảnh** |
+| trộn điểm thô (trước B2) | 113/600 = 0,1883 | [0,159; 0,222] | −335 ảnh |
+
+Ba điều rút ra, theo thứ tự quan trọng:
+
+1. **Chuẩn hoá trước khi trộn là bắt buộc, không phải tinh chỉnh.** Bỏ nó mất **55,8 điểm** hit@1.
+   Đây là kết quả mạnh nhất của cả mục này, và nó không nói gì về siêu dữ liệu — nó nói về cách trộn
+   những tín hiệu khác thang đo.
+2. **Siêu dữ liệu có trần cao.** Cấu hình oracle — cố tình đọc trộm siêu dữ liệu thật của query —
+   được **+17,5 điểm**. Vấn đề không nằm ở ý tưởng. Nếu oracle mà không hơn tầng 1 thì đã kết luận
+   được "siêu dữ liệu không giúp gì" và dừng; nó hơn, nên không dừng được.
+3. **Nhưng trần đó chưa với tới.** Cấu hình thật *thấp hơn* tầng 1 đúng 14 ảnh — nằm trong khoảng
+   nhiễu (hai KTC chồng nhau gần hết), nên đọc là **"chưa có tác dụng"**, không phải "làm hỏng".
+
+Cấu hình oracle được vẽ rỗng ruột trong Hình 4 của báo cáo và ghi thẳng chữ *chẩn đoán* vì nó gian
+lận có chủ ý. Nó là trần, không phải điểm.
+
+### 15.4 Chỗ nghẽn, đã định lượng
+
+Query là ảnh scan chưa biết là chữ gì nên không tra được siêu dữ liệu của nó. Cách thay thế là
+`infer_query_meta()`: **bỏ phiếu từ láng giềng toàn corpus** (softmax theo cosine, nhiệt độ 0,05,
+top-50), và bộ thủ nào thắng với biên dưới `min_margin=0,15` thì **trả về None** — thà bỏ tín hiệu
+còn hơn xếp hạng theo một phỏng đoán.
+
+Đo trực tiếp bước này (`--suite scans`):
+
+| cách suy ra bộ thủ của query | độ chính xác |
+|---|---:|
+| đoán đều tay (1/214) | 0,0047 |
+| luôn đoán bộ phổ biến nhất | 0,0489 |
+| **bỏ phiếu, tầng 1 zero-shot** | **0,1186** |
+| **bỏ phiếu, tầng 1 fine-tune** | **0,6610** |
+
+Với tầng 1 zero-shot, phép bỏ phiếu **sai 88% số lần** — hơn đoán mò 2,4× nhưng vẫn là nhiễu, trong
+khi bộ thủ chiếm trọng số 0,20 của điểm tổng. Tầng xếp hạng lại đang được nuôi bằng nhiễu.
+
+Nguyên nhân có tính cơ chế chứ không phải chuyện tinh chỉnh: phiếu lấy từ láng giềng của tầng 1, mà
+tầng 1 zero-shot chỉ đúng 8,47% trên scan thật (mục 10.2). Đa số phiếu là của chữ sai. **Đổi tầng 1
+sang mô hình fine-tune thì độ chính xác nhảy 5,6× lên 0,6610.** Mắt xích yếu nằm ở tầng đứng trước,
+không ở thiết kế của phép suy luận.
+
+### 15.5 Ba hạn chế của chính phép đo này
+
+Cần nói rõ, vì mục này là một kết quả âm, và một kết quả âm chỉ dùng được khi biết nó đo trong điều
+kiện nào.
+
+- **Bảng 15.3 đo trên render SẠCH, không suy giảm.** Lệnh đã chạy (ghi trong `make_figures.py`)
+  không có `--augment`, và hit@1 tầng 1 là 0,7467 — khớp mốc render sạch 0,7018 của mục 13.3, chứ
+  không phải mốc suy giảm 0,1986. Nghĩa là tầng 1 ở đây **đã rất mạnh sẵn**, còn rất ít chỗ cho tầng
+  hai cải thiện. Docstring của `evaluate_rerank.py` khuyên chạy cả bốn cấu hình kèm `--augment`;
+  **điều đó chưa được làm**, và đó mới là phép đo có ý nghĩa hơn.
+- **Hai bảng ở trên đến từ hai suite khác nhau.** 15.3 là `--suite render` (ảnh render sạch), 15.4
+  là `--suite scans` (59 scan thật). Nên chuỗi lập luận "xếp hạng lại thất bại *vì* bỏ phiếu chỉ
+  đúng 11,86%" đang nối một thất bại đo trên render với một chẩn đoán đo trên scan. `--suite render`
+  **có in** độ chính xác bỏ phiếu của chính nó, nhưng con số đó chưa được ghi lại vào
+  `make_figures.py`. Ghi lại là việc rẻ và sẽ khép kín được lập luận.
+- **Chưa chạy trên cấu hình tốt nhất.** Toàn bộ bảng 15.3 dùng tầng 1 `chinese-clip-large` zero-shot.
+  Với `chinese-clip-ft`, chỗ nghẽn ở 15.4 gần như biến mất (0,1186 → 0,6610), nên câu hỏi "xếp hạng
+  lại có giúp không" **vẫn chưa được trả lời ở nơi nó có cơ hội trả lời có**.
+
+### 15.6 Việc tiếp theo, theo thứ tự
+
+1. **Chạy `--suite scans --backend chinese-clip-ft`.** Rẻ nhất, code đã sẵn, và là thí nghiệm duy
+   nhất có thể lật kết luận của mục này. `--suite scans` không dính nhiễm dữ liệu như `--suite
+   render` (59 scan thật không nằm trong tập huấn luyện), nên đây là chỗ đo hợp lệ duy nhất cho mô
+   hình đã fine-tune.
+2. **Chạy lại bảng 15.3 kèm `--augment`**, để tầng 1 không còn ở mức dễ 0,75.
+3. **Ghi độ chính xác bỏ phiếu của `--suite render` vào `MEASUREMENTS`**, khép kín lập luận ở 15.5.
+4. Chỉ sau ba việc trên mới nên đụng tới trọng số. Tinh chỉnh trọng số khi tín hiệu bộ thủ còn sai
+   88% là tinh chỉnh nhiễu — và `evaluate_rerank.py` đã tự in cảnh báo đúng điều đó khi độ chính xác
+   dưới 0,40.
+
+**Không được tinh chỉnh trọng số theo `radical@k`.** Đó chính là vòng tròn ở 15.1. Chỉ tinh chỉnh
+theo `--suite render` hoặc `--suite scans`.
+
 ## Phụ lục: file kết quả
 
 | file | nội dung |
@@ -1048,3 +1192,6 @@ theo xu hướng nào. Tín hiệu huấn luyện đã cạn: 24 lớp lấy ng�
 | `output/label_sheets/*.png` + `label_template.csv` | phiếu gán nhãn Phần 2 (mục 10.6) |
 | `output/rendered/<font>/<UNICODE>.png` + `manifest.csv` | 131.604 ảnh render đa font, nhãn = mã Unicode (mục 13) |
 | `output/finetune/best.pt` + `train.log` | checkpoint fine-tune và log đầy đủ mọi lần eval (mục 14) |
+| `output/output_top_k_similar_char_<tag>_reranked_<normalize>.xlsx` / `.csv` | top-20 sau khi xếp hạng lại, kèm cả điểm ảnh gốc (mục 15) |
+| `output/rerank_proxy_<tag>_<normalize>.xlsx` | phép đo **vòng tròn có chủ ý**: 2 sheet `Circular` + `Warnings`. Không trích vào báo cáo (mục 15.1) |
+| `output/embeddings_render_<tag>_<clean\|aug>_<n>.npz` | cache embedding của ảnh render dùng làm query ở `--suite render` |

@@ -15,7 +15,9 @@ change a script's CLI or a headline number, update that section in the same comm
 A university group project ("Image Comparison") for finding visually-similar Sino-Nôm (Chữ Nôm /
 Hán-Nôm) characters by comparing character glyph images. This is not a conventional application —
 it's a set of standalone analysis scripts plus their input data (Excel dictionaries and a corpus of
-character images). There is no build system, package manifest, or test suite.
+character images). There is no build system and no package manifest beyond `requirements.txt`.
+There *is* a test suite — `python -m pytest -q` → 55 passed, pandas only, no torch needed; see the
+Tests section below.
 
 Two search modes exist, mirroring how the assignment was handed out:
 - **Part 1** — top-K similar characters across the *whole* corpus (`search_all_chars_in_corpus.py`).
@@ -33,10 +35,12 @@ why the code is shaped the way it is:
 | 2 | Rerank/filter top-K using the unused metadata columns (`RADICAL`, `STROKE_NUM`, `SHAPE_MORPH`); upgrade Part 2 from Canny+histogram to embeddings. |
 | 3 | Real evaluation (Precision@k with weak labels), report/slides, and the stretch goal of structural decomposition per the FudanOCR paper. |
 
-Person 1's work is functionally complete but **the full-corpus numbers for the two ViT backends are
-not yet measured** — see "Current status" below. Persons 2 and 3 have not started; deliberately do
-not pre-empt their scope. In particular the proxy metrics in `benchmark_extractors.py` exist only to
-rank backends against each other — they are *not* the real evaluation, which is Person 3's task.
+**All three scopes have now been worked.** Person 1 produced `feature_extractors.py` /
+`benchmark_extractors.py` and the full-corpus numbers; Person 2 produced `rerank.py` /
+`evaluate_rerank.py` plus the Part 2 embedding upgrade; Person 3 produced `evaluate_test_images.py`,
+the hand-assigned Part 2 labels, and the report. The one thing that remains explicitly *not* done is
+a **human relevance evaluation** — the proxy metrics in `benchmark_extractors.py` exist only to rank
+backends against each other and are not that, which every results table in the repo says out loud.
 
 ## Data files (read-only inputs, do not regenerate by hand)
 
@@ -45,7 +49,9 @@ rank backends against each other — they are *not* the real evaluation, which i
 - `final_characteristics-v2.xlsx` — master character table. Key columns used by the scripts:
   `UNICODE` (hex codepoint, matches image filenames) and `CHAR` (the actual glyph). Also carries
   linguistic metadata (`AM_NOM`, `STROKE_NUM`, `RADICAL`, `SHAPE_MORPH`, `STROKE`, `VARIATION`,
-  `P_ANCIENT`, `P_MODERN`) not currently consumed by the scripts.
+  `P_ANCIENT`, `P_MODERN`). The retrieval pipeline never reads these; `benchmark_extractors.py`
+  uses three of them as weak labels and `rerank.py` uses the *same* three as features — which is
+  exactly why scoring the reranker with those metrics is circular (B1).
 - `QuocNgu_SinoNom_Dic.xlsx` — mapping table with columns `QuocNgu` (modern Vietnamese romanized
   word) and `SinoNom` (corresponding Sino-Nôm character(s)). Used to restrict similarity search to
   characters sharing a given Quốc Ngữ reading.
@@ -351,6 +357,124 @@ Output: `output/output_embedding_<backend>_similarity.{xlsx,csv}` and/or
 predicted widening happened: on clean corpus queries the two methods agreed on 6/10 of the top-10;
 on real scans they agree on top-1 only 23/59 (39.0%). See `evaluate_test_images.py` above.
 
+### `rerank.py` — metadata reranking, and the four defects it was built around
+
+Stage 1 proposes candidates from pixels alone. `Reranker` rescores them with the three columns the
+image models cannot see: `RADICAL`, `STROKE_NUM`, `SHAPE_MORPH`. Weights default to
+visual 0.55 / radical 0.20 / stroke 0.15 / shape 0.10.
+
+Deliberately imports **only stdlib + pandas** — never `search_all_chars_in_corpus`, which would pull
+in torch and faiss and make the pure-logic unit tests need a 200 MB install. Heavy imports live
+inside `main()`. Keep it that way. (`analyze_metric_ceiling.py` does *not* keep it that way — it
+reaches `parse_radical` out of `benchmark_extractors`, dragging torch in for a pandas-only stage.)
+
+The labels B1–B4 are used consistently in the module docstring, `test_rerank.py` and
+`evaluate_rerank.py`:
+
+- **B1 — circularity.** The three proxy metrics in `benchmark_extractors.py` are derived from the
+  exact three columns this module consumes. `circularity_report()` names the metrics a given weight
+  configuration invalidates, and `warn_circular()` prints a banner. **Never tune weights against
+  `radical@k`.**
+- **B2 — normalize before mixing.** Signals are z-scored *within each candidate list*
+  (`normalize='zscore'`). Mixing raw is not a mixture at all: at default weights a candidate must
+  win visual similarity by more than **0.364 cosine** to overcome one radical mismatch, and top-20
+  cosines never span that, so raw mixing degenerates into a lexicographic sort (radical, then
+  stroke) with the image model demoted to tie-breaker. Measured cost of getting this wrong: **55.8
+  points of hit@1** (0.7467 → 0.1883). `normalize='none'` reproduces the old behaviour and exists
+  only as the baseline that measures the fix; `'rrf'` is a rank-only alternative.
+- **B3 — a query image has no metadata.** That is the real case for `test_images/` and for rendered
+  glyphs. Passing `None` used to silently drop every metadata signal, turning the reranker into a
+  no-op that still looked like it ran; it now raises. Use `infer_query_meta(corpus_neighbours)`,
+  which votes the query's radical/strokes/components out of its **whole-corpus** top-50 (softmax
+  over cosine, temperature 0.05). Feed it corpus-wide neighbours, **never** a Part 2 same-reading
+  group — those characters share a reading, not a shape. A radical whose vote margin is under
+  `min_margin=0.15` returns `None`: declining to rerank beats reranking toward a guess.
+- **B4 — the wrong frame.** `load_corpus()` returns only UNICODE/CHAR/path, so `Reranker(df)` on it
+  died with `KeyError: 'RADICAL'`. Use `Reranker.from_excel()`; the constructor validates columns
+  and says so.
+
+`score()` is gone — it scored one pair in isolation, which B2 makes meaningless. Its replacement is
+`raw_signals()` (unnormalized, for explaining a ranking) plus `rerank()` (two-pass, because
+normalizing needs the whole candidate list).
+
+Two details worth not re-deriving: components are a `Counter`, not a set, so 林 `⿰木木` stays
+distinguishable from 木, and `_shape_sim` is **IDF-weighted** — sharing a rare component is much
+stronger evidence than sharing 口 (which appears in 1,520 of 29,510 decomposable characters).
+`parse_radical` returns the glyph `一`, not `nhất 一`; note this differs from
+`benchmark_extractors.parse_radical`, which keeps reading+glyph. Verified they induce the **same
+214-group partition** with the same 135 nulls, so the two are interchangeable for grouping — but
+they are two independent parsers of one column, so keep them in step.
+
+### `evaluate_rerank.py` — three suites, only one of which produces a number
+
+```bash
+S="--suite render --sample 600 --backend chinese-clip-large --dtype fp16"
+python evaluate_rerank.py $S --no-rerank        # stage-1 baseline
+python evaluate_rerank.py $S --oracle-meta      # ceiling — DIAGNOSTIC, never a result
+python evaluate_rerank.py $S                    # the real configuration
+python evaluate_rerank.py $S --normalize none   # pre-B2, measures what B2 bought
+```
+
+- `--suite proxy` — the **circular** measurement, run on purpose and labelled invalid. Columns get a
+  `[CIRCULAR]` suffix and the .xlsx carries a `Warnings` sheet, so a number pasted into a slide
+  carries its own warning. A demonstration, never a result.
+- `--suite render` — the honest number. Label is the character's own Unicode codepoint, which owes
+  nothing to the three metadata columns. Every query is an image of unknown identity, so this suite
+  necessarily exercises `infer_query_meta`.
+- `--suite scans` — the read-out on the 59 real scans with the human labels. Report it, do not tune
+  on it (±13 points at n=59).
+
+Results, and the fact that they are a **negative result reported with its ceiling** — full write-up
+in **BENCHMARK.md §15**:
+
+| configuration | hit@1 (n=600) | vs stage 1 |
+|---|---:|---:|
+| stage 1, no rerank | 448/600 = 0.7467 | — |
+| *rerank, oracle metadata* (**diagnostic**) | *553/600 = 0.9217* | *+105* |
+| **rerank, real** | **434/600 = 0.7233** | **−14** |
+| raw mixing (pre-B2) | 113/600 = 0.1883 | −335 |
+
+The bottleneck is measured, not guessed: inferring the query's radical by neighbour voting is right
+only **11.86%** of the time on real scans with a zero-shot stage 1 — 2.4× random but wrong 88% of
+the time, while radical carries weight 0.20. With `chinese-clip-ft` as stage 1 it jumps to
+**0.6610**. The weak link is the stage in front of it, not the inference design.
+
+**Three caveats before anyone cites this as "metadata does not help":**
+
+1. The table was measured on **clean** renders (`make_figures.py` records the command; there is no
+   `--augment`), where stage 1 already scores 0.7467 — very little headroom. The script's own
+   docstring recommends `--augment` for all four configurations; that has not been run.
+2. The table and the 11.86% come from **two different suites** (render vs scans), so the causal
+   chain joining them is not yet closed. `--suite render` prints its own voting accuracy; that
+   number is not recorded in `make_figures.py`.
+3. **Nobody has run it with `chinese-clip-ft` as stage 1**, which is the one configuration where the
+   bottleneck is gone. `--suite scans --backend chinese-clip-ft` is uncontaminated (the 59 scans are
+   not in training) and is the cheapest experiment that could overturn the conclusion.
+
+### Tests — `test_rerank.py`, `test_evaluate_rerank.py`, `conftest.py`
+
+`python -m pytest -q` → **55 passed**, ~25 s, and it needs **no torch and no GPU** — pandas only.
+That is a deliberate property of `rerank.py`'s import discipline; do not break it.
+
+The suite is not decorative: it pins each of B1–B4 as a named test (`test_b2_raw_mixing_needs_an_
+impossible_cosine_gap_to_flip`, `test_b3_none_query_raises_instead_of_becoming_a_noop`, …), it
+verifies `RADICAL_RE` matches **every** non-null value in the real table, and it checks that all 59
+rows of `label_template.csv` agree between `correct_index` and `correct_unicode`.
+
+`conftest.py` does two things, both load-bearing:
+
+- `collect_ignore_glob = ["submission/*", ...]` — `package_submission.py` copies the test files into
+  `submission/`, and without this pytest collects both copies and aborts with "import file
+  mismatch". This recurs after every packaging run; fix it here, not by deleting `__pycache__`.
+- Tests marked `data` **skip** rather than fail when `final_characteristics-v2.xlsx` is absent,
+  because that table is course-given data and is not bundled in `submission.zip`. A marker running
+  `pytest` on the unpacked submission should see skips, not three red tests.
+
+**Coverage gap worth closing:** `telex_variants` / `decode_filenames` in `evaluate_test_images.py`
+have **no tests**, despite being pure logic (no torch), being the source of ground truth for *every*
+headline number, and having already carried a real bug — `words.pop()` mutated the set inside
+`lookup`, so the second image of any repeated word was silently dropped.
+
 ### `finetune_glyph.py` — the fine-tune, and the one that failed first
 
 Trains the Chinese-CLIP ViT-B/16 image tower for **typeface invariance**: same Unicode codepoint
@@ -574,9 +698,30 @@ and deterministic; the speed metrics are indicative.
 
 ## Current status — pick up here
 
-**Person 1's work is complete.** All six backends have been run over the full corpus on the H100,
-compared, and written up in **[`BENCHMARK.md`](BENCHMARK.md)** — the deliverable. Everything below
-is the condensed version; `BENCHMARK.md` has the full analysis, method, and limitations.
+**The project has shipped**: all six backends benchmarked over the full corpus, a fine-tune that
+moved real-scan hit@1 from 0.0847 to 0.5932, a labelled Part 2 evaluation, a metadata reranker with
+a non-circular evaluation, and the submission package. Everything is written up in
+**[`BENCHMARK.md`](BENCHMARK.md)** — the deliverable — with `report/paper.tex` as the submitted
+report. Everything below is the condensed version; `BENCHMARK.md` has the full analysis, method,
+and limitations.
+
+**The two things actually left open**, in priority order:
+
+1. **Run `evaluate_rerank.py --suite scans --backend chinese-clip-ft --dtype fp16`.** The reranker's
+   negative result (BENCHMARK.md §15) was measured with a zero-shot stage 1, whose radical-voting
+   step is right only 11.86% of the time. With the finetuned stage 1 that jumps to 0.6610, so the
+   question "does reranking help" has not been asked where it can answer yes. Cheap, code is
+   already there, and `--suite scans` is uncontaminated.
+2. **A human relevance evaluation.** Backend agreement is 8–13%, so the proxy metrics are doing real
+   separating work — which also means a human judgement would be decisive rather than confirmatory.
+
+**One methodological caveat to carry into any write-up:** `finetune_glyph.py` selects `best.pt` by
+maximising hit@1 on `test_images/` (line ~472), the same 59 scans every headline number is reported
+on. No pixel of `test_images/` enters training — `_assert_test_images_unseen` guarantees that — but
+the *checkpoint choice* does see them, across ~10–30 evaluations on a set with a ±13-point CI. The
+0.5932 vs 0.0847 conclusion survives easily (35/59 vs 5/59 is far larger than any selection effect),
+but the absolute figure is optimistically biased. Either say so in BENCHMARK.md §11 and the paper,
+or select on the held-out classes instead and report the test set once.
 
 Reproduce end to end (~6 minutes total on GPU, embeddings are cached afterwards):
 
@@ -589,6 +734,7 @@ Reproduce end to end (~6 minutes total on GPU, embeddings are cached afterwards)
 .venv/bin/python search_all_chars_in_corpus.py --backend dinov2             --device cuda --batch-size 32
 .venv/bin/python benchmark_extractors.py   # defaults to all six
 .venv/bin/python benchmark_search.py       # exact-vs-ANN study, reads the caches
+.venv/bin/python -m pytest -q              # 55 passed, needs neither GPU nor torch
 ```
 
 `benchmark_extractors.py` finds each backend's cache whichever precision it was built at, so the
