@@ -15,7 +15,10 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{amsmath}
-\usepackage{amssymb}
+% unicode-math thay cho amssymb: nó cung cấp cả \mathbb/\mathcal VÀ cho phép đặt font toán.
+% Không có dòng \setmathfont bên dưới thì phần toán ra Computer Modern trong khi thân bài
+% là Termes --- hai kiểu chữ khác nhau trong cùng một câu, thấy rõ nhất ở "$n = 59$".
+\usepackage{unicode-math}
 \usepackage{array}
 \usepackage[hidelinks]{hyperref}
 \usepackage{url}
@@ -32,6 +35,8 @@
   ItalicFont=*-italic, BoldItalicFont=*-bolditalic, Ligatures=TeX]
 \setmonofont{texgyrecursor}[Extension=.otf, UprightFont=*-regular, BoldFont=*-bold,
   ItalicFont=*-italic, BoldItalicFont=*-bolditalic, Scale=0.86]
+
+\setmathfont{texgyretermes-math.otf}
 
 % Font chữ Nôm. BabelStone phủ phần lớn; HanaMinB phủ Ext-B (chữ Nôm riêng) mà BabelStone thiếu.
 % Đã kiểm bằng bảng cmap: mọi ký tự trong bài đều nằm trong font được gán.
@@ -62,19 +67,17 @@ Trọng số: \url{https://huggingface.co/vohoangkh4ng/chinese-clip-ft-sinonom}}
 
 \begin{abstract}
 Báo cáo trình bày một hệ thống tìm kiếm ảnh ký tự Hán-Nôm tương đồng trên corpus 26.044 glyph, và
-quá trình cải thiện nó qua ba bước đo được. Thứ nhất, thay bộ trích đặc trưng ResNet18 của bản gốc
-bằng tháp ảnh Chinese-CLIP, nâng \code{radical@k} từ 0,2316 lên 0,5361. Thứ hai, xây dựng phép đánh
-giá trên ảnh scan thật thay vì chỉ dựa vào chỉ số proxy: 59 ảnh viết tay có nhãn giải mã từ tên file
-và được người đọc kiểm lại; trên tập này mô hình tốt nhất chỉ đạt \code{hit@1} = 0,0847, thấp hơn
-hẳn mức mà các chỉ số proxy gợi ý. Thứ ba, fine-tune bằng học tương phản có giám sát trên 141.981
-ảnh render đa font với nhãn là mã Unicode, đưa \code{hit@1} trên chính 59 ảnh scan đó lên
-\textbf{0,5932} --- hai khoảng tin cậy 95\% rời hẳn nhau. Trên bài toán xếp hạng trong nhóm ký tự
-cùng âm Quốc Ngữ, độ chính xác top-1 tăng từ 0,4746 lên \textbf{0,8136}. Các lớp Unicode bị giữ
-hoàn toàn ngoài tập huấn luyện đạt kết quả bằng đúng các lớp đã huấn luyện (0,9939 so với 0,9954),
-nên phần cải thiện không đến từ ghi nhớ. Chúng tôi cũng khảo sát một tầng xếp hạng lại bằng siêu dữ
-liệu ngôn ngữ học và báo cáo nó như một \emph{kết quả âm}: siêu dữ liệu có trần cao (oracle cho
-$+17{,}5$ điểm) nhưng suy ra siêu dữ liệu của ảnh truy vấn mới là chỗ nghẽn. Mọi kết quả âm --- kể
-cả một lần huấn luyện bị sụp đổ biểu diễn --- được giữ lại vì nguyên nhân của chúng có tính lặp lại.
+ba bước ngoặt cải thiện nó, tất cả đo trên cùng một tập đánh giá. Thứ nhất, thay bộ trích đặc trưng
+ResNet18 của bản gốc bằng tháp ảnh Chinese-CLIP: \code{radical@k} đi từ 0,2316 lên 0,5361. Thứ hai,
+chuyển từ chỉ số proxy sang đo trên 59 ảnh scan viết tay thật --- nơi mô hình tốt nhất chỉ đạt
+\code{hit@1} = 0,0847, thấp hơn hẳn mức mà chỉ số proxy gợi ý. Thứ ba, fine-tune bằng học tương phản
+có giám sát trên 141.981 ảnh render đa font với nhãn là mã Unicode: \code{hit@1} trên chính 59 ảnh
+scan đó lên \textbf{0,5932}, gấp bảy lần và hai khoảng tin cậy 95\% rời hẳn nhau; ở bài toán xếp
+hạng trong nhóm ký tự cùng âm Quốc Ngữ, độ chính xác top-1 tăng từ 0,4746 lên \textbf{0,8136}. Các
+lớp Unicode bị giữ hoàn toàn ngoài tập huấn luyện đạt kết quả bằng đúng các lớp đã huấn luyện
+(0,9939 so với 0,9954), nên phần cải thiện không đến từ ghi nhớ. Các kết quả âm --- tầng xếp hạng
+lại bằng siêu dữ liệu và một lần huấn luyện bị sụp đổ biểu diễn --- được giữ lại kèm nguyên nhân,
+vì chúng có tính lặp lại.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -174,7 +177,7 @@ giải thích vì sao huấn luyện trên chúng rồi báo cáo chính chúng 
 \begin{table}[t]
 \caption{Các tập dữ liệu. Ba tập đầu là đầu vào cho trước; hai tập sau do nhóm tạo hoặc gán nhãn.}
 \label{tab:data}
-\centering\small
+\centering\footnotesize
 % Cột p{} mặc định căn đều hai bên, làm chữ giãn xấu trong ô hẹp -> ép raggedright.
 \newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 \begin{tabular}{@{}L{1.95cm}L{1.75cm}L{3.85cm}@{}}
@@ -230,7 +233,7 @@ biến đổi đều là nhiễu ảnh, \emph{không đụng tới cấu trúc b
 \begin{table}[t]
 \caption{Khoảng cách đo được giữa scan thật và ảnh render. Hàm suy giảm mô phỏng đúng sáu trục này.}
 \label{tab:degrade}
-\centering\small
+\centering\footnotesize
 \begin{tabular}{@{}lrrrl@{}}
 \toprule
 Chỉ số & Scan & Render & Tỉ lệ & Ý nghĩa \\
@@ -259,7 +262,7 @@ luyện chứ không phải đánh giá.
 \begin{table}[t]
 \caption{Cấu hình fine-tune.}
 \label{tab:ft}
-\centering\small
+\centering\footnotesize
 \begin{tabular}{@{}p{1.6cm}p{6.0cm}@{}}
 \toprule
 Thành phần & Lựa chọn \\
@@ -825,17 +828,17 @@ Tập hiện tại đã đi kèm mã nguồn ở kho lưu trữ nêu ở đầu 
 \label{tab:future}
 \centering\footnotesize
 \newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
-\begin{tabular}{@{}L{2.6cm}L{1.5cm}L{3.5cm}@{}}
-\hline
-\textbf{Việc} & \textbf{Chi phí} & \textbf{Kỳ vọng} \\
-\hline
-$n$: 59 $\rightarrow$ 300 & công gán nhãn & CI $\pm13 \rightarrow \pm5{,}7$ điểm \\
+\begin{tabular}{@{}L{2.5cm}L{1.75cm}L{3.3cm}@{}}
+\toprule
+Việc & Chi phí & Kỳ vọng \\
+\midrule
+$n$: 59 $\rightarrow$ 300 & gán nhãn & CI $\pm13 \rightarrow \pm5{,}7$ điểm \\
 Âm theo bộ thủ & sửa sampler & gradient không tắt sớm \\
-Semi-hard mining & $+71$\,s/epoch & chưa rõ; cần theo dõi \code{cos} \\
+Semi-hard mining & $+71$\,s/epoch & chưa rõ; phải theo dõi \code{cos} \\
 ViT-L + LoRA & vừa 6\,GB & mở lại câu hỏi scale \\
 Ảnh bút lông thật & thu thập & đóng khoảng cách phân phối \\
 Phân loại bộ thủ & huấn luyện phụ & trần oracle $+17{,}5$ điểm \\
-\hline
+\bottomrule
 \end{tabular}
 \end{table}
 
@@ -958,7 +961,7 @@ tắt cho vừa cột.\par} Nhật ký huấn luyện đầy đủ, gồm cả l
 \begin{table}[h]
 \caption{Môi trường đã kiểm chứng. Cột VRAM là mức đỉnh thực đo, không phải dung lượng card.}
 \label{tab:env}
-\centering\small
+\centering\footnotesize
 \begin{tabular}{@{}ll@{}}
 \toprule
 Thành phần & Giá trị \\
@@ -1002,7 +1005,7 @@ bỏ qua --- đó là hành vi đã định, không phải lỗi.
 \begin{table}[h]
 \caption{Nội dung \code{submission.zip}.}
 \label{tab:pkg}
-\centering\small
+\centering\footnotesize
 \newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 \begin{tabular}{@{}L{1.5cm}L{6.1cm}@{}}
 \toprule
