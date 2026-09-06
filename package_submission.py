@@ -65,6 +65,8 @@ TRAIN_LOG = "output/finetune/train.log"
 #: Điền vào sau khi tải checkpoint lên. Để trống thì MODEL.md sẽ ghi rõ là còn thiếu, chứ không
 #: lặng lẽ sinh ra một liên kết chết.
 MODEL_URL = "https://huggingface.co/vohoangkh4ng/chinese-clip-ft-sinonom"
+#: Kho mã, để người chấm tái lập được mà không cần giải nén gói này.
+REPO_URL = "https://github.com/vo-hoang-kh4ng/comparing-character-glyph-images-Sino-N-m"
 
 
 def sha256(path, chunk=1 << 20):
@@ -289,6 +291,9 @@ def main():
             path = os.path.join(root, name)
             total += os.path.getsize(path)
     lines = ["# Nội dung gói nộp", "",
+             f"Kho mã (bản đầy đủ, có lịch sử git): <{REPO_URL}>",
+             f"Trọng số đã huấn luyện: <{MODEL_URL}>", "",
+             "Hướng dẫn tái lập từng bước, kèm giá trị kỳ vọng để đối chiếu, nằm trong `README.md`.", "",
              f"Tổng dung lượng: **{human(total)}**", "",
              "| Đường dẫn | Dung lượng | Nội dung |", "|---|---|---|"]
     for name, desc in SOURCE_FILES:
@@ -313,7 +318,8 @@ def main():
               "1. `report/paper.pdf` — báo cáo chính; Phụ lục A có toàn bộ lệnh tái lập,",
               "   Phụ lục B môi trường và chi phí, Phụ lục C cấu trúc gói này.",
               "2. `data/DATA.md` — cách lấy phần dữ liệu không kèm trong gói.",
-              "3. `model/MODEL.md` — checkpoint và các mô hình pretrain bên ngoài.", ""]
+              "3. `model/MODEL.md` — checkpoint và các mô hình pretrain bên ngoài.",
+              "4. `README.md` mục **Tái lập** — quy trình đầy đủ, chạy được từ một bản clone sạch.", ""]
     with open(os.path.join(out, "MANIFEST.md"), "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines))
 

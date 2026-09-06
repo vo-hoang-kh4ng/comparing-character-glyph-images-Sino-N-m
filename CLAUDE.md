@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Repo: <https://github.com/vo-hoang-kh4ng/comparing-character-glyph-images-Sino-N-m>
+Model: <https://huggingface.co/vohoangkh4ng/chinese-clip-ft-sinonom>
+
+**The repo itself is the submitted artefact** — the marker reproduces from a clean clone, so
+`README.md`'s "Tái lập" section is a deliverable, not a courtesy. Every command in it must run
+as written from the repo root, and each step carries the expected value to check against. If you
+change a script's CLI or a headline number, update that section in the same commit.
+
 ## What this is
 
 A university group project ("Image Comparison") for finding visually-similar Sino-Nôm (Chữ Nôm /
