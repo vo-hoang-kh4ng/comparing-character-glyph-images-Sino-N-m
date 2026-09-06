@@ -736,6 +736,110 @@ những khẳng định còn lại thì đứng vững được.
 \end{itemize}
 
 % =====================================================================
+\section{Hướng phát triển}
+\label{sec:future}
+
+Mục~\ref{sec:discuss} nói về những gì đồ án đã học được; mục này nói về những gì đồ án chưa làm
+được và ước lượng chi phí của từng việc. Thứ tự dưới đây xếp theo tỉ lệ giữa mức cải thiện kỳ vọng
+và công sức bỏ ra, chứ không theo mức độ hấp dẫn về mặt kỹ thuật.
+
+\subsection{Gỡ nút thắt phép đo trước khi gỡ nút thắt mô hình}
+
+Việc đáng làm nhất không nằm ở mô hình. Với $n = 59$, khoảng tin cậy Wilson ở $\hat{p} \approx 0{,}5$
+rộng $\pm13$ điểm (mục~\ref{sec:eval}), nghĩa là mọi thay đổi nhỏ hơn 13 điểm hiện không phân biệt
+được với nhiễu. Tăng lên $n \approx 300$ đưa khoảng này về $\pm5{,}7$ điểm, đủ để đo những cải tiến
+cỡ vài điểm --- vốn là cỡ của phần lớn các ý còn lại trong mục này. Chi phí là công scan và gán nhãn,
+không cần GPU.
+
+Kèm theo đó là hai việc làm cho nhãn đứng vững hơn: (i) để \emph{hai} người gán độc lập nhãn Phần 2
+rồi báo cáo hệ số đồng thuận Cohen $\kappa$, thay vì một người so hình như hiện nay; (ii) nhờ người
+đọc được Hán-Nôm soát lại 6/59 dòng đang ở mức \emph{med}/\emph{low}. Mục~\ref{sec:neg} đã cho thấy
+một nhãn sai đủ sức tự làm giảm kết quả của chính nhóm, nên đây không phải việc hình thức.
+
+\subsection{Hard negative mining}
+
+Nhật ký huấn luyện cho thấy hàm mất mát rơi về 0,0068 chỉ sau khoảng 400 bước. Đó không phải dấu
+hiệu mô hình đã giỏi, mà là dấu hiệu bài toán trong batch quá dễ: 24 lớp bốc ngẫu nhiên từ 23.440
+lớp thì gần như chắc chắn khác nhau cả về bộ thủ lẫn số nét, nên gradient tắt sớm. Hai cách sửa,
+đều không cần đổi kiến trúc:
+
+\begin{itemize}
+  \item \textbf{Lấy mẫu âm theo bộ thủ.} Dùng cột bộ thủ sẵn có trong
+        \code{final\_characteristics-v2.xlsx} để ép mỗi batch chứa nhiều lớp \emph{cùng} bộ thủ. Dữ
+        liệu đã có, chỉ phải sửa \code{PKSampler} ở mục~\ref{sec:loss}.
+  \item \textbf{Semi-hard negative mining trực tuyến.} Sau mỗi epoch, đánh chỉ mục toàn bộ corpus
+        bằng chính mô hình đang huấn luyện rồi lấy $k$ láng giềng gần nhất của mỗi lớp làm nguồn
+        âm cho epoch sau. Chi phí thêm là một lượt encode 26.044 ảnh mỗi epoch --- 71 giây trên
+        cấu hình ở Phụ lục~\ref{app:env}, nhỏ so với thời gian huấn luyện.
+\end{itemize}
+
+Cần lưu ý cảnh báo ở mục~\ref{sec:collapse}: negative càng khó thì biên độ an toàn trước sụp đổ
+biểu diễn càng hẹp. Bất kỳ thí nghiệm nào theo hướng này đều phải theo dõi chỉ số \code{cos} (cosine
+trung bình của 2.000 vector ngẫu nhiên) song song với hàm mất mát, vì hàm mất mát giảm \emph{cũng}
+là điều xảy ra khi biểu diễn sụp đổ.
+
+\subsection{Backbone lớn hơn, trong giới hạn VRAM}
+
+Fine-tune dừng ở ViT-B/16 vì ViT-L/14 không vừa VRAM trên máy dùng chung, chứ không vì đã có bằng
+chứng rằng large không tốt hơn. Zero-shot thì large \emph{có} hơn base (mục~\ref{sec:gen}), nên câu
+hỏi vẫn mở. Ba cách để chạy được large trong cùng 6\,GB: LoRA thay vì cập nhật toàn bộ trọng số,
+gradient checkpointing, và tích luỹ gradient để giữ nguyên $P \times K = 24 \times 2$ hiệu dụng với
+batch vật lý nhỏ hơn. Cùng lúc đó nên chạy \emph{ba} seed thay vì một, vì chênh lệch giữa các epoch
+(0,51--0,59) hiện đã bằng cỡ nhiễu của phép đo.
+
+\subsection{Dữ liệu viết tay thật, thứ mà render không sinh ra được}
+
+Toàn bộ cặp dương hiện sinh bằng render font in cộng augment mô phỏng scan (mục~\ref{sec:render}).
+Cách này tái tạo được biến dạng của \emph{quá trình chụp}, nhưng về nguyên tắc không tái tạo được
+biến dạng của \emph{nét bút}: tốc độ bút, độ nhoè mực, lối viết hành thư nối nét. Khoảng cách phân
+phối còn lại giữa query viết tay và corpus khải thư in vì thế không đóng lại được bằng thêm augment.
+Hướng đi là bổ sung ảnh thư pháp bút lông thật --- hoặc thu thập, hoặc khai thác các bộ dữ liệu chữ
+Hán viết tay hiện có rồi ánh xạ sang tập ký tự Nôm qua bảng Unicode.
+
+\subsection{Hoàn thiện tầng xếp hạng lại}
+
+Mục~\ref{sec:rerank} đã định vị chính xác chỗ nghẽn: không phải ở cách trộn điểm, mà ở bước suy ra
+bộ thủ của \emph{ảnh truy vấn}. Oracle cho thấy còn $+17{,}5$ điểm dư địa nếu bước đó đúng. Việc cụ
+thể là huấn luyện một bộ phân loại bộ thủ trên chính corpus đã có nhãn bộ thủ, rồi đưa phân phối
+xác suất của nó (chứ không phải nhãn cứng) vào công thức trộn điểm. Ngoài ra cần chạy lại đủ bốn
+cấu hình của Hình~\ref{fig:rerank} trên tầng 1 \emph{đã} fine-tune --- phép đo hiện có làm trên tầng
+1 zero-shot nên chưa kết luận được gì về hệ thống cuối.
+
+\subsection{Quy mô lớn hơn}
+
+Mọi kết luận về chỉ mục đều đo ở $N = 26.044$, nơi \code{IndexFlatIP} vẫn là lựa chọn đúng vì search
+chỉ chiếm 6\% thời gian. Hai điều cần kiểm lại khi corpus lớn hơn: ngưỡng thực sự để chuyển sang chỉ
+mục xấp xỉ (ước lượng hiện tại, khoảng 300.000 ký tự, là ngoại suy chứ chưa đo), và recall của
+HNSW~\cite{hnsw} ở $N$ lớn --- con số 99,1\% đo ở $N = 26.044$ không được suy diễn cho mốc một triệu.
+
+\subsection{Công bố tập scan như một tài nguyên}
+
+59 ảnh scan viết tay kèm nhãn hiện là tập đánh giá thật duy nhất của đồ án, và theo hiểu biết của
+nhóm thì chưa có bộ dữ liệu công khai nào đúng dạng \emph{ảnh viết tay Hán-Nôm $\rightarrow$ ký tự
+trong corpus in} để so sánh. Nếu mở rộng được lên vài trăm ảnh như mục trên, việc công bố kèm giao
+thức đánh giá và khoảng tin cậy sẽ có ích cho người sau hơn là bản thân các con số của đồ án này.
+Tập hiện tại đã đi kèm mã nguồn ở kho lưu trữ nêu ở đầu bài.
+
+\begin{table}[h]
+\caption{Các hướng phát triển, xếp theo tỉ lệ lợi ích trên chi phí.}
+\label{tab:future}
+\centering\footnotesize
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\begin{tabular}{@{}L{2.6cm}L{1.5cm}L{3.5cm}@{}}
+\hline
+\textbf{Việc} & \textbf{Chi phí} & \textbf{Kỳ vọng} \\
+\hline
+$n$: 59 $\rightarrow$ 300 & công gán nhãn & CI $\pm13 \rightarrow \pm5{,}7$ điểm \\
+Âm theo bộ thủ & sửa sampler & gradient không tắt sớm \\
+Semi-hard mining & $+71$\,s/epoch & chưa rõ; cần theo dõi \code{cos} \\
+ViT-L + LoRA & vừa 6\,GB & mở lại câu hỏi scale \\
+Ảnh bút lông thật & thu thập & đóng khoảng cách phân phối \\
+Phân loại bộ thủ & huấn luyện phụ & trần oracle $+17{,}5$ điểm \\
+\hline
+\end{tabular}
+\end{table}
+
+% =====================================================================
 \section{Kết luận}
 
 Mục~\ref{sec:discuss} đã tách riêng những điều khái quát ra ngoài bài toán chữ Nôm; phần này
@@ -752,10 +856,9 @@ Phụ lục~\ref{app:env}, cấu trúc gói nộp ở Phụ lục~\ref{app:pkg} 
         ký tự; search chỉ chiếm 6\% thời gian ở cỡ hiện tại.
   \item \textbf{Xếp hạng lại bằng siêu dữ liệu chưa dùng được, nhưng biết rõ vì sao.} Oracle cho thấy
         còn $+17{,}5$ điểm dư địa; chỗ nghẽn là bước suy ra bộ thủ của ảnh truy vấn.
-  \item \textbf{Việc tiếp theo, theo thứ tự chi phí.} (a) \emph{Hard negative mining}: hàm mất mát
-        hiện rơi về 0,0068 chỉ sau 400 bước vì 24 lớp lấy ngẫu nhiên từ 23.440 thì phân biệt quá dễ.
-        (b) Scan thêm ảnh thật để gỡ nút thắt $n = 59$. (c) Bổ sung dữ liệu thư pháp bút lông thật
-        --- thứ mà render font về nguyên tắc không sinh ra được.
+  \item \textbf{Việc tiếp theo, theo thứ tự chi phí.} Mục~\ref{sec:future} và Bảng~\ref{tab:future}
+        liệt kê đầy đủ; ba việc đứng đầu là gỡ nút thắt $n = 59$, lấy mẫu âm theo bộ thủ, và bổ sung
+        dữ liệu thư pháp bút lông thật --- thứ mà render font về nguyên tắc không sinh ra được.
 \end{enumerate}
 
 % =====================================================================
