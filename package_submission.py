@@ -92,50 +92,73 @@ def copy(src, dst):
         shutil.copy2(src, dst)
 
 
-DATA_MD = """# Dữ liệu
+def data_md(with_corpus, with_model):
+    """DATA.md phải mô tả gói THỰC SỰ được dựng, không phải gói mặc định.
 
-## Kèm trong gói này
+    Người chấm giải nén xong thì câu hỏi đầu tiên là "đặt file nào vào đâu". Trước đây phần này
+    viết cứng cho bản không kèm corpus, nên với bản ``--with-corpus`` nó lại đi bảo người ta tải
+    dữ liệu vốn đã nằm ngay trong gói -- và vẫn không nói ``label_template.csv`` phải chuyển vào
+    ``output/label_sheets/``, thứ mà không có thì mọi con số Phần 2 không chạy lại được.
+    """
+    setup = ["# Dữ liệu", "", "## Đặt file vào đâu", "",
+             "Mọi lệnh chạy **từ trong thư mục `src/`**, vì script phân giải `./images`, `./output`,",
+             "`./test_images` theo thư mục làm việc hiện tại. Từ `src/`:", "",
+             "```bash",
+             "cp -r ../data/test_images       ./test_images",
+             "mkdir -p output/label_sheets",
+             "cp ../data/label_template.csv   output/label_sheets/"]
+    if with_corpus:
+        setup += ["cp -r ../data/images            ./images",
+                  "cp ../data/*.xlsx              ./"]
+    if with_model:
+        setup += ["mkdir -p output/finetune",
+                  "cp ../model/best_fp16.pt       output/finetune/best.pt"]
+    setup += ["```", "",
+              "Sau đó chạy theo **thứ tự** ở mục *Tái lập* của `README.md`. Thứ tự có ràng buộc: mọi phép",
+              "đánh giá đều đọc cache đặc trưng, nên `search_all_chars_in_corpus.py` phải chạy trước",
+              "`evaluate_test_images.py`, nếu không script sẽ dừng và bảo đúng thiếu cái gì.", ""]
 
-| Đường dẫn | Mô tả |
-|---|---|
-| `test_images/` | 59 ảnh scan thật, chữ viết tay. **Đây là tập đánh giá.** Tên file gõ Telex (`cofn.jpg` = "còn") nên nhãn giải mã ngược ra được từ chính tên file. |
-| `label_template.csv` | Nhãn Phần 2 **do người gán tay**, kèm cột `confidence` (53 high / 4 med / 2 low). Chạy lại code KHÔNG sinh lại được file này, và mọi con số Phần 2 phụ thuộc vào nó. |
-| `train.log` | Nhật ký đầy đủ của lần fine-tune, gồm cả lần ArcFace bị sụp đổ (mục 6.3 của báo cáo). |
+    have = ["## Kèm trong gói này", "", "| Đường dẫn | Mô tả |", "|---|---|",
+            "| `test_images/` | 59 ảnh scan thật, chữ viết tay. **Đây là tập đánh giá.** Tên file gõ Telex (`cofn.jpg` = \"còn\") nên nhãn giải mã ngược ra được từ chính tên file. |",
+            "| `label_template.csv` | Nhãn Phần 2 **do người gán tay**, kèm cột `confidence` (53 high / 4 med / 2 low). Chạy lại code KHÔNG sinh lại được file này, và mọi con số Phần 2 phụ thuộc vào nó. |",
+            "| `train.log` | Nhật ký đầy đủ của lần fine-tune, gồm cả lần ArcFace bị sụp đổ. |"]
+    if with_corpus:
+        have += ["| `images/` | Corpus 26.044 ảnh glyph — dữ liệu cho trước của môn học. |",
+                 "| `final_characteristics-v2.xlsx` | Bảng thuộc tính ký tự (`UNICODE`, `CHAR`, `RADICAL`, `STROKE_NUM`, `SHAPE_MORPH`). |",
+                 "| `QuocNgu_SinoNom_Dic.xlsx` | Ánh xạ âm Quốc Ngữ ↔ ký tự, dùng cho Phần 2. |"]
+    have += [""]
 
-## Không kèm, và cách lấy
+    miss = ["## Không kèm, và cách lấy", ""]
+    if not with_corpus:
+        miss += ["**Corpus 26.044 ảnh glyph + hai bảng thuộc tính** (~106 MB) --- dữ liệu cho trước của môn",
+                 "học, tải theo liên kết Drive ghi trong `README.md`. Giải nén `images.zip` thành `./images`,",
+                 "đặt `final_characteristics-v2.xlsx` và `QuocNgu_SinoNom_Dic.xlsx` vào cùng thư mục `src/`.", ""]
+    if not with_model:
+        miss += ["**Trọng số đã fine-tune** --- không đóng gói lại; tải một lệnh:", "",
+                 "```bash", "mkdir -p output/finetune",
+                 "curl -L -o output/finetune/best.pt \\",
+                 f"  {MODEL_URL}/resolve/main/best_fp16.pt", "```", ""]
+    miss += ["**131.604 ảnh render đa font** (~1,1 GB) --- không nộp kèm vì sinh lại được và hoàn toàn",
+             "tất định:", "",
+             "```bash",
+             "bash download_fonts.sh          # tải 7 font Hán-Nôm tự do vào ./fonts",
+             "python render_fonts.py          # ~20 phút trên 16 nhân CPU -> output/rendered/",
+             "```", "",
+             "Không cần `--augment`: `finetune_glyph.py` suy giảm ảnh **trực tuyến** lúc nạp dữ liệu, nên",
+             "tập huấn luyện thật sự không bao giờ nằm trên đĩa.", ""]
 
-**Corpus 26.044 ảnh glyph + hai bảng thuộc tính** (~106 MB) --- dữ liệu cho trước của môn học, tải
-theo liên kết Drive ghi trong `README.md`. Giải nén `images.zip` thành `./images`, đặt
-`final_characteristics-v2.xlsx` và `QuocNgu_SinoNom_Dic.xlsx` vào thư mục gốc.
+    tests = ["## Chạy test", "", "Từ thư mục `src/`:", "", "```bash", "python -m pytest -q", "```", "",
+             "Đủ dữ liệu thì **55 test pass**. Chưa đặt `final_characteristics-v2.xlsx` vào thư mục làm",
+             "việc thì **48 pass + 7 skip** — các test đọc bảng thuộc tính sẽ *skip*, không phải *fail*:",
+             "thiếu dữ liệu không phải là code hỏng. Đặt file đó vào rồi chạy lại là đủ 55.", "",
+             "## Ghi chú về rò rỉ dữ liệu", "",
+             "`test_images/` **không** đi vào huấn luyện. Điều này được bảo đảm bằng một `assert` chạy",
+             "trước mỗi lần huấn luyện (`_assert_test_images_unseen` trong `finetune_glyph.py`), không",
+             "phải bằng quy ước. Ngoài ra, 2.604 mã Unicode bị gỡ toàn bộ khỏi tập huấn luyện để đo khả",
+             "năng tổng quát hoá.", ""]
+    return "\n".join(setup + have + miss + tests)
 
-**131.604 ảnh render đa font** (~1,1 GB) --- không nộp kèm vì sinh lại được và hoàn toàn tất định:
 
-```bash
-bash download_fonts.sh          # tải 7 font Hán-Nôm tự do vào ./fonts
-python render_fonts.py          # ~20 phút trên 16 nhân CPU -> output/rendered/
-```
-
-Không cần `--augment`: `finetune_glyph.py` suy giảm ảnh **trực tuyến** lúc nạp dữ liệu, nên tập
-huấn luyện thật sự không bao giờ nằm trên đĩa.
-
-## Chạy test
-
-Từ thư mục `src/`:
-
-```bash
-python -m pytest -q
-```
-
-Đủ dữ liệu thì **55 test pass**. Nếu chưa đặt `final_characteristics-v2.xlsx` vào thư mục làm việc
-thì sẽ thấy **3 fail + 4 skip** — đó là các test cần bảng thuộc tính thật, không phải code hỏng.
-Đặt file đó vào rồi chạy lại là đủ 55.
-
-## Ghi chú về rò rỉ dữ liệu
-
-`test_images/` **không** đi vào huấn luyện. Điều này được bảo đảm bằng một `assert` chạy trước mỗi
-lần huấn luyện (`_assert_test_images_unseen` trong `finetune_glyph.py`), không phải bằng quy ước.
-Ngoài ra, 2.604 mã Unicode bị gỡ toàn bộ khỏi tập huấn luyện để đo khả năng tổng quát hoá.
-"""
 
 
 def model_md(url, ckpt_included, ckpt_info):
@@ -245,7 +268,7 @@ def main():
     if os.path.exists(TRAIN_LOG):
         copy(TRAIN_LOG, os.path.join(out, "data", "train.log"))
     with open(os.path.join(out, "data", "DATA.md"), "w", encoding="utf-8") as handle:
-        handle.write(DATA_MD)
+        handle.write(data_md(args.with_corpus, args.with_model))
     if args.with_corpus:
         for name in ("images", "final_characteristics-v2.xlsx", "QuocNgu_SinoNom_Dic.xlsx"):
             if os.path.exists(name):
