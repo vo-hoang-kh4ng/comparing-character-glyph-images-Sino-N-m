@@ -2,7 +2,9 @@
 images.zip
 images/
 *.xlsx
-test_images/
+# test_images/ ĐƯỢC theo dõi: 59 ảnh scan, 1,2 MB, là tập đánh giá thật duy nhất của đồ án và là
+# nguồn của mọi con số chính. Không có nó thì clone repo về không tái lập được kết quả nào.
+# Bản .zip gốc thì vẫn bỏ qua (xem cuối file).
 output/*
 # Nhãn Phần 2 do người gán tay — KHÔNG sinh lại được bằng cách chạy lại code,
 # nên phải theo dõi. Mọi thứ còn lại trong output/ (cache .npz, ảnh render,

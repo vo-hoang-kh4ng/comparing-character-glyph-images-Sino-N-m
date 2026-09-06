@@ -460,7 +460,11 @@ training.
 
 Bulk data (`images.zip`, both `.xlsx` files, `materials/`, `phan_cong_cong_viec.xlsx`) is gitignored
 — too large / not source. It is distributed via a Google Drive folder linked in README.md.
-`./output/`, `./images/`, and `./test_images/` are gitignored too (generated or local-only).
+`./output/` and `./images/` are gitignored too (generated, or course-given bulk data).
+
+**`test_images/` IS tracked** — 59 scans, 1.2 MB. It is the project's only real evaluation set and
+the source of every headline number, so a clone has to carry it or nothing reproduces. Same reason
+`output/label_sheets/label_template.csv` is tracked: hand-assigned labels, not regenerable.
 
 So a fresh clone needs:
 
@@ -471,8 +475,7 @@ unzip images.zip -d images          # -> ./images/<UNICODE>.jpg
 # final_characteristics-v2.xlsx and QuocNgu_SinoNom_Dic.xlsx go in the repo root
 ```
 
-Both search scripts create `./output/` themselves. `test_images/` ships separately from the Drive
-bundle (a `test_images-*.zip`); unzip it into the repo root.
+Both search scripts create `./output/` themselves. `test_images/` comes with the clone.
 
 ```bash
 python search_all_chars_in_corpus.py --backend chinese-clip     # or resnet18 / resnet18-gray / dinov2

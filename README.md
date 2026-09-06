@@ -25,23 +25,26 @@ mục 0 trước khi chạy lệnh nào.
 
 ## 0. Cần chuẩn bị gì
 
-**Dữ liệu đầu vào của đề bài không nằm trong repo** (ảnh corpus 103 MB, và `*.xlsx` bị `.gitignore`
-loại vì là dữ liệu được phát chứ không phải mã nguồn nhóm viết). Cần đặt ba thứ sau vào **thư mục
-gốc repo**:
+**Tập đánh giá đã có sẵn trong repo.** Hai thứ quan trọng nhất cho việc chấm bài đi kèm bản clone,
+không phải tải ở đâu cả:
+
+- `test_images/` — **59 ảnh scan viết tay**, tập đánh giá thật duy nhất của đồ án và là nguồn của
+  mọi con số chính trong báo cáo.
+- `output/label_sheets/label_template.csv` — nhãn Phần 2 do người gán tay. Chạy lại code **không**
+  sinh lại được file này; xoá là mất vĩnh viễn.
+
+**Dữ liệu đề bài phát thì không nằm trong repo** (ảnh corpus 103 MB, hai bảng `.xlsx` 3,2 MB — là
+dữ liệu được phát chứ không phải mã nguồn nhóm viết). Cần đặt ba thứ sau vào **thư mục gốc repo**:
 
 | Cần có | Đặt ở đâu | Bắt buộc cho |
 |---|---|---|
 | `images/` (giải nén từ `images.zip`, 26.044 file `<UNICODE>.jpg`) | `./images/` | mọi thứ |
 | `final_characteristics-v2.xlsx` | `./` | mọi thứ |
 | `QuocNgu_SinoNom_Dic.xlsx` | `./` | Phần 2 |
-| `test_images/` (giải nén từ `test_images-*.zip`, 59 ảnh scan) | `./test_images/` | mục 3, 5 — **các con số chính** |
 
 Nếu thầy/cô chấm bài: đây đúng là bộ dữ liệu đã phát cho lớp, đặt vào như bảng trên là đủ. Bản sao
 dự phòng ở Google Drive:
 <https://drive.google.com/drive/folders/12kfJjiM866taJS_-QhOS30TmRi1000Bt>
-
-Nhãn Phần 2 (`output/label_sheets/label_template.csv`) **có** trong repo — đó là nhãn nhóm gán tay,
-chạy lại code không sinh lại được, và mọi con số Phần 2 phụ thuộc vào nó.
 
 Phần cứng: mục 1–3 chạy được trên CPU. Mục 4 (fine-tune) cần **GPU ≥ 6 GB** — đo thực tế đỉnh
 3,7 GB. Không có GPU thì bỏ qua mục 4 và tải trọng số từ Hugging Face ở mục 5.
