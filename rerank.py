@@ -243,8 +243,17 @@ class Reranker:
     # --- circularity guard (B1) -------------------------------------------------------------
 
     def active_feature_columns(self):
-        """Spreadsheet columns that actually move the ranking (weight > 0)."""
-        return {col for signal, col in FEATURE_COLUMNS.items() if self.weights.get(signal, 0.0) > 0}
+        """Spreadsheet columns that actually move the ranking (weight != 0).
+
+        ``!= 0``, not ``> 0``: a *negative* weight still drives the ranking -- it just drives it
+        the other way. With ``radical=-0.5`` the order inverts outright (same-radical candidates
+        sink to the bottom), so ``radical@k`` is every bit as circular as it is at ``+0.20``. The
+        old ``> 0`` reported that configuration as clean, which is the one thing this guard must
+        never do. ``parse_weights`` rejects negatives at the CLI, but library callers construct
+        ``Reranker(weights=...)`` directly, so the guard cannot rely on that.
+        """
+        return {col for signal, col in FEATURE_COLUMNS.items()
+                if self.weights.get(signal, 0.0) != 0}
 
     def circularity_report(self):
         """Weak-label metrics invalidated by this configuration: {metric: source column}.
@@ -522,11 +531,30 @@ def parse_weights(text):
     if not text:
         return weights
     for item in text.split(','):
-        key, _, value = item.partition('=')
+        key, sep, value = item.partition('=')
         key = key.strip()
         if key not in SIGNALS:
             raise SystemExit(f"unknown signal {key!r}; expected one of {SIGNALS}")
-        weights[key] = float(value)
+        # Every other CLI error in this project exits with a message; a bare ValueError
+        # traceback from float() was the one path that made a typo look like a crash.
+        if not sep:
+            raise SystemExit(f"{item.strip()!r} is missing '='; write it as {key}=0.3")
+        try:
+            weight = float(value)
+        except ValueError:
+            raise SystemExit(
+                f"weight for {key!r} is {value.strip()!r}, which is not a number; "
+                f"write it as {key}=0.3"
+            )
+        # A negative weight inverts the signal -- it ranks *dissimilar* candidates first, which is
+        # never what this reranker is for, and it used to slip past the B1 guard silently. Set the
+        # weight to 0 to switch a signal off.
+        if weight < 0:
+            raise SystemExit(
+                f"weight for {key!r} is {weight}; negative weights invert the signal (they rank "
+                f"dissimilar candidates first). Use 0 to disable a signal."
+            )
+        weights[key] = weight
     return weights
 
 

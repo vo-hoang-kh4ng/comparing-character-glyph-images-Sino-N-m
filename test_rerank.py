@@ -32,6 +32,7 @@ from rerank import (
     Reranker,
     parse_components,
     parse_radical,
+    parse_weights,
 )
 
 # Column order is REQUIRED_COLUMNS: UNICODE, CHAR, RADICAL, STROKE_NUM, SHAPE_MORPH.
@@ -292,6 +293,89 @@ def test_b1_zeroing_a_weight_untaints_only_that_metric():
 def test_b1_visual_only_reranking_is_not_circular():
     weights = {"visual": 1.0, "radical": 0.0, "stroke": 0.0, "shape": 0.0}
     assert build(weights=weights).circularity_report() == {}
+
+
+def test_b1_a_negative_weight_still_reorders_the_list():
+    """Precondition for the test below: a negative weight is not a disabled signal.
+
+    Only visual and radical are active, and every candidate is handed the same cosine, so the
+    radical signal alone decides the order. B001/G001 share the query's 木; A001/F001 do not.
+    """
+    candidates = [("A001", 0.8), ("B001", 0.8), ("F001", 0.8), ("G001", 0.8)]
+    base = dict(DEFAULT_WEIGHTS, stroke=0.0, shape=0.0)
+
+    positive = order(build(weights=dict(base, radical=0.2)).rerank("Q001", candidates))
+    negative = order(build(weights=dict(base, radical=-0.2)).rerank("Q001", candidates))
+    disabled = order(build(weights=dict(base, radical=0.0)).rerank("Q001", candidates))
+
+    assert positive == ["B001", "G001", "A001", "F001"]
+    assert negative == ["A001", "F001", "B001", "G001"]   # inverted, not ignored
+    assert negative != disabled
+
+
+def test_b1_a_negative_weight_is_still_circular():
+    """The guard must key on 'does this column move the ranking', not on the sign.
+
+    ``active_feature_columns`` used to test ``weight > 0``, so ``--weights radical=-0.5`` ranked
+    by RADICAL (backwards, per the test above) while reporting itself as clean -- the one failure
+    mode a circularity guard must not have.
+    """
+    weights = dict(DEFAULT_WEIGHTS, radical=-0.5)
+    assert build(weights=weights).circularity_report() == {
+        "radical@k": "RADICAL",
+        "stroke_mae@k": "STROKE_NUM",
+        "ids_jaccard@k": "SHAPE_MORPH",
+    }
+
+
+# --- CLI weight parsing ---------------------------------------------------------------------
+
+def test_parse_weights_defaults_when_nothing_is_passed():
+    assert parse_weights(None) == DEFAULT_WEIGHTS
+    assert parse_weights("") == DEFAULT_WEIGHTS
+
+
+def test_parse_weights_overrides_only_the_named_signals():
+    weights = parse_weights("visual=0.9,radical=0.1")
+    assert weights["visual"] == 0.9 and weights["radical"] == 0.1
+    assert weights["stroke"] == DEFAULT_WEIGHTS["stroke"]
+
+
+def test_parse_weights_rejects_an_unknown_signal():
+    with pytest.raises(SystemExit):
+        parse_weights("radicals=0.3")
+
+
+def test_parse_weights_rejects_a_negative_weight():
+    """Negatives are refused at the CLI; the B1 guard covers callers who bypass it."""
+    with pytest.raises(SystemExit, match="negative"):
+        parse_weights("radical=-0.5")
+
+
+def test_parse_weights_rejects_an_empty_value():
+    """A typo must exit with a message, not a bare ValueError traceback from float()."""
+    with pytest.raises(SystemExit, match="not a number"):
+        parse_weights("visual=")
+
+
+def test_parse_weights_rejects_a_non_numeric_value():
+    with pytest.raises(SystemExit, match="not a number"):
+        parse_weights("visual=high")
+
+
+def test_parse_weights_rejects_an_item_with_no_equals():
+    with pytest.raises(SystemExit, match="missing '='"):
+        parse_weights("visual")
+
+
+def test_parse_weights_still_reports_a_bad_signal_before_a_bad_value():
+    """'radicals=' is two mistakes; naming the signal first is the more useful message."""
+    with pytest.raises(SystemExit, match="unknown signal"):
+        parse_weights("radicals=")
+
+
+def test_parse_weights_accepts_zero_as_the_way_to_disable_a_signal():
+    assert parse_weights("radical=0")["radical"] == 0.0
 
 
 # --- general behaviour -----------------------------------------------------------------------
