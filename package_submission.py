@@ -48,6 +48,7 @@ SOURCE_FILES = [
     ("test_evaluate_rerank.py", "Unit test cho evaluate_rerank.py"),
     ("conftest.py", "Khai báo marker pytest"),
     ("build_report.py", "Sinh báo cáo .docx/.pdf"),
+    ("make_figures.py", "Sinh 5 hình trong bài báo từ số liệu thật"),
     ("package_submission.py", "Chính script này"),
     ("download_fonts.sh", "Tải 7 font Hán-Nôm tự do"),
     ("requirements.txt", "Phụ thuộc Python"),
@@ -216,7 +217,8 @@ def main():
 
     # Kiểm trước, dựng sau. Thiếu file mà vẫn dựng thì ra một gói trông đầy đủ nhưng hỏng.
     missing = [f for f, _ in SOURCE_FILES if not os.path.exists(f)]
-    for path in (LABELS, "report/BaoCao.docx", "report/BaoCao.pdf"):
+    for path in (LABELS, "report/paper.pdf", "report/paper.tex",
+                 "report/BaoCao.docx", "report/BaoCao.pdf"):
         if not os.path.exists(path):
             missing.append(path)
     if missing:
@@ -272,8 +274,13 @@ def main():
         handle.write(model_md(MODEL_URL, args.with_model and os.path.exists(CKPT), info))
 
     # --- báo cáo ---
-    for name in ("BaoCao.docx", "BaoCao.pdf"):
+    for name in ("paper.pdf", "paper.tex", "BaoCao.docx", "BaoCao.pdf"):
         copy(os.path.join("report", name), os.path.join(out, "report", name))
+    # Nguồn hình đi kèm .tex, nếu không thì paper.tex trong gói không biên dịch lại được.
+    for name in sorted(os.listdir(os.path.join("report", "figs"))):
+        if name.endswith((".pdf", ".png")):
+            copy(os.path.join("report", "figs", name),
+                 os.path.join(out, "report", "figs", name))
 
     # --- manifest ---
     total = 0
@@ -294,14 +301,17 @@ def main():
               "| `data/train.log` | Nhật ký fine-tune, gồm cả lần huấn luyện thất bại |",
               "| `data/DATA.md` | Nguồn từng tập, và cách lấy phần không kèm |",
               "| `model/MODEL.md` | Checkpoint của nhóm + định danh mô hình bên ngoài |",
-              "| `report/BaoCao.pdf` `.docx` | Báo cáo |",
+              "| `report/paper.pdf` | **Báo cáo chính** (9 trang, định dạng bài hội nghị) |",
+              "| `report/paper.tex` `figs/` | Nguồn LaTeX và hình của báo cáo chính |",
+              "| `report/BaoCao.pdf` `.docx` | Cùng nội dung, bản Doc |",
               "| `BENCHMARK.md` | Bản dài: mọi bảng, mọi lần chạy, mọi kết quả âm |", ""]
     if manifest:
         lines += ["## Checksum", "", "| File | Dung lượng | SHA-256 |", "|---|---|---|"]
         lines += [f"| `{n}` | {human(s)} | `{d}` |" for n, s, d in manifest]
         lines.append("")
     lines += ["## Bắt đầu từ đâu", "",
-              "1. `report/BaoCao.pdf` — báo cáo, Phụ lục A có toàn bộ lệnh tái lập.",
+              "1. `report/paper.pdf` — báo cáo chính; Phụ lục A có toàn bộ lệnh tái lập,",
+              "   Phụ lục B môi trường và chi phí, Phụ lục C cấu trúc gói này.",
               "2. `data/DATA.md` — cách lấy phần dữ liệu không kèm trong gói.",
               "3. `model/MODEL.md` — checkpoint và các mô hình pretrain bên ngoài.", ""]
     with open(os.path.join(out, "MANIFEST.md"), "w", encoding="utf-8") as handle:

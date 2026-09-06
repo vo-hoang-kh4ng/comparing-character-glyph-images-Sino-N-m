@@ -69,10 +69,13 @@ toán OCR/đối chiếu chữ Nôm cổ.
   **0,4407** (histogram) — chênh đúng 2 ảnh, xem cảnh báo ở mục 10.6 về việc không được đọc khoảng
   cách này là kết luận.
 
-- **Báo cáo nộp** — `build_report.py` → `report/BaoCao.pdf` (11 trang: 8 trang thân bài + 3 trang
-  phụ lục tái lập). Sinh bằng script chứ không gõ tay, để mọi con số truy ngược được về lệnh đã
-  chạy. Máy phát triển không có TeX nên `report/report.tex` (bản kỹ thuật dài) **chưa từng biên
-  dịch** — bản `.docx`/`.pdf` mới là bản nộp.
+- **Báo cáo nộp** — `report/paper.pdf`, **9 trang, định dạng bài hội nghị (IEEEtran) hai cột, 5
+  hình**, kèm ba phụ lục: toàn bộ lệnh tái lập, môi trường và chi phí tính toán, cấu trúc gói nộp.
+  Nguồn là `report/paper.tex`; biên dịch bằng `tectonic -X compile report/paper.tex` (bắt buộc
+  XeLaTeX/LuaLaTeX vì có chữ Nôm ngoài BMP). Hình do `make_figures.py` sinh từ số liệu thật vào
+  `report/figs/` — sửa script rồi chạy lại, đừng sửa tay file PDF.
+  Bản Doc cùng nội dung: `build_report.py` → `report/BaoCao.docx` + `.pdf` (9 trang).
+  `report/report.tex` là bản kỹ thuật dài **đã bị thay thế**, giữ lại làm lịch sử.
 
 - **Mô hình đã huấn luyện** — [vohoangkh4ng/chinese-clip-ft-sinonom](https://huggingface.co/vohoangkh4ng/chinese-clip-ft-sinonom)
   trên Hugging Face. Bản fp16, 172 MB; model card ghi đủ kết quả kèm khoảng tin cậy, code dùng
@@ -170,8 +173,10 @@ python evaluate_test_images.py --backend chinese-clip-ft --dtype fp16 --device c
        --labels output/label_sheets/label_template.csv
 
 # Báo cáo và gói nộp
-python build_report.py                             # -> report/BaoCao.docx + BaoCao.pdf
-python package_submission.py --with-model --zip    # -> submission/ và submission.zip
+python make_figures.py                             # -> report/figs/fig1..fig5.pdf
+tectonic -X compile report/paper.tex               # -> report/paper.pdf (báo cáo chính, 9 trang)
+python build_report.py                             # -> report/BaoCao.docx + BaoCao.pdf (bản Doc)
+python package_submission.py --zip                 # -> submission/ và submission.zip
 
 # Phần 2 - mặc định dùng embedding, tái dùng cache của Phần 1
 python search_use_QuocNgu_mapping.py --word ta --image ./images/54B1.jpg --method both

@@ -388,16 +388,38 @@ VRAM: ~3.7 GB at batch 48 with gradient checkpointing and bf16 — that is why t
 and not large. large does not fit for *training* alongside the vLLM engines. If the GPU frees up,
 raise the batch size before changing the backbone, or the comparison table stops being like-for-like.
 
-### `build_report.py` and `package_submission.py` — the submission
+### `paper.tex`, `make_figures.py`, `build_report.py`, `package_submission.py` — the submission
 
-`build_report.py` generates `report/BaoCao.docx` and `.pdf` (11 pages: 8 body + 3 appendix). It is a
+`build_report.py` generates `report/BaoCao.docx` and `.pdf` (9 pages). It is a
 script, not a hand-written document, so every number traces back to the command that produced it and
 a stale figure is one edit away rather than a hunt.
 
-**There is no TeX on this box** (no `xelatex`, no `pandoc`, no sudo), so `report/report.tex` — the
-older long-form technical report — **has never been compiled**. LibreOffice *is* installed, and it
-exports both formats the course accepts, which is why the deliverable is .docx/.pdf. If you edit the
-report, edit `build_report.py`; `report.tex` is now the superseded long version.
+**The submitted report is now `report/paper.tex`, and it does compile.** Tectonic 0.17.0 is
+installed at `~/.local/bin/tectonic` — a single static binary, no sudo, downloads TeX packages on
+demand — so the earlier "there is no TeX on this box" note is obsolete:
+
+```bash
+export PATH=$HOME/.local/bin:$PATH
+tectonic -X compile report/paper.tex        # -> report/paper.pdf, 9 pages
+```
+
+`paper.tex` is IEEEtran two-column, 9 pages, 5 figures, with three appendices (reproduction
+commands, environment/cost, package layout). It **must** be XeLaTeX or LuaLaTeX, never pdflatex:
+the Nôm glyphs live outside the BMP and only reach the page through `fontspec`.
+
+**Load fonts by filename, not by system name.** `\setmainfont{TeX Gyre Termes}` fails under tectonic
+because a system name needs the font registered with fontconfig; `\setmainfont{texgyretermes}[Extension=.otf, UprightFont=*-regular, ...]` resolves through kpathsea and works on every TeX Live /
+MiKTeX / Tectonic install. That is the difference between "compiles on my machine" and "compiles
+anywhere", and it is why the Nôm faces are loaded with an explicit `Path=../fonts/`.
+
+`make_figures.py` generates all five figures into `report/figs/` from real measurements — a
+`MEASUREMENTS` dict holds every number together with the command that produced it. **Do not hand-edit
+the PDFs in `figs/`**; change the script and re-run it.
+
+`build_report.py` still generates `report/BaoCao.docx` / `.pdf` (9 pages, two-column) via
+LibreOffice — the same content in the Doc format the course also accepts. `report/report.tex` is the
+**superseded** long-form technical report, kept for history and never successfully compiled; its
+header says so.
 
 **Nôm fonts must be in `~/.fonts`** or every Ext-B glyph renders as an empty box in the PDF — and it
 fails silently, the .docx still opens. `ensure_fonts()` copies them on every run.
