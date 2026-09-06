@@ -108,7 +108,7 @@ def data_md(with_corpus, with_model):
              "mkdir -p output/label_sheets",
              "cp ../data/label_template.csv   output/label_sheets/"]
     if with_corpus:
-        setup += ["cp -r ../data/images            ./images",
+        setup += ["unzip -q ../data/images.zip -d ./images    # 26.044 ảnh corpus",
                   "cp ../data/*.xlsx              ./"]
     if with_model:
         setup += ["mkdir -p output/finetune",
@@ -123,7 +123,7 @@ def data_md(with_corpus, with_model):
             "| `label_template.csv` | Nhãn Phần 2 **do người gán tay**, kèm cột `confidence` (53 high / 4 med / 2 low). Chạy lại code KHÔNG sinh lại được file này, và mọi con số Phần 2 phụ thuộc vào nó. |",
             "| `train.log` | Nhật ký đầy đủ của lần fine-tune, gồm cả lần ArcFace bị sụp đổ. |"]
     if with_corpus:
-        have += ["| `images/` | Corpus 26.044 ảnh glyph — dữ liệu cho trước của môn học. |",
+        have += ["| `images.zip` | Corpus 26.044 ảnh glyph — dữ liệu cho trước của môn học. Giữ nguyên dạng `.zip`; giải nén theo lệnh ở mục trên. |",
                  "| `final_characteristics-v2.xlsx` | Bảng thuộc tính ký tự (`UNICODE`, `CHAR`, `RADICAL`, `STROKE_NUM`, `SHAPE_MORPH`). |",
                  "| `QuocNgu_SinoNom_Dic.xlsx` | Ánh xạ âm Quốc Ngữ ↔ ký tự, dùng cho Phần 2. |"]
     have += [""]
@@ -270,9 +270,20 @@ def main():
     with open(os.path.join(out, "data", "DATA.md"), "w", encoding="utf-8") as handle:
         handle.write(data_md(args.with_corpus, args.with_model))
     if args.with_corpus:
-        for name in ("images", "final_characteristics-v2.xlsx", "QuocNgu_SinoNom_Dic.xlsx"):
+        for name in ("final_characteristics-v2.xlsx", "QuocNgu_SinoNom_Dic.xlsx"):
             if os.path.exists(name):
                 copy(name, os.path.join(out, "data", name))
+        # Corpus đi vào gói dưới dạng images.zip LỒNG BÊN TRONG, không phải 26.044 file rời.
+        # Hai lý do, cả hai đều đã cắn: (1) 26k entry làm Google Drive nghẹn lúc tải lên, người
+        # nhận thấy báo "unreadable"; (2) ảnh .jpg vốn đã nén nên deflate lại chỉ tốn CPU mà không
+        # bớt được byte nào -- dùng ZIP_STORED. Đây cũng đúng dạng đề bài phát ban đầu.
+        if os.path.isdir("images"):
+            nested = os.path.join(out, "data", "images.zip")
+            names = sorted(os.listdir("images"))
+            with zipfile.ZipFile(nested, "w", zipfile.ZIP_STORED) as zf:
+                for name in names:
+                    zf.write(os.path.join("images", name), name)
+            print(f"  data/images.zip — {len(names)} ảnh, {human(os.path.getsize(nested))}")
 
     # --- mô hình ---
     # Mặc định nộp bản fp16. Đường ống suy luận vốn cast model sang fp16 ngay khi nạp, nên bản fp16
