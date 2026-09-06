@@ -148,7 +148,7 @@ def data_md(with_corpus, with_model):
              "tập huấn luyện thật sự không bao giờ nằm trên đĩa.", ""]
 
     tests = ["## Chạy test", "", "Từ thư mục `src/`:", "", "```bash", "python -m pytest -q", "```", "",
-             "Đủ dữ liệu thì **55 test pass**. Chưa đặt `final_characteristics-v2.xlsx` vào thư mục làm",
+             "Đủ dữ liệu thì **66 test pass**. Chưa đặt `final_characteristics-v2.xlsx` vào thư mục làm",
              "việc thì **48 pass + 7 skip** — các test đọc bảng thuộc tính sẽ *skip*, không phải *fail*:",
              "thiếu dữ liệu không phải là code hỏng. Đặt file đó vào rồi chạy lại là đủ 55.", "",
              "## Ghi chú về rò rỉ dữ liệu", "",

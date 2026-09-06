@@ -56,7 +56,7 @@ git clone https://github.com/vo-hoang-kh4ng/comparing-character-glyph-images-Sin
 cd comparing-character-glyph-images-Sino-N-m
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m pytest -q          # kỳ vọng: 55 passed
+.venv/bin/python -m pytest -q          # kỳ vọng: 66 passed
 ```
 
 Mọi lệnh bên dưới viết `.venv/bin/python`; **chạy từ trong thư mục gốc repo**, vì mọi script phân
