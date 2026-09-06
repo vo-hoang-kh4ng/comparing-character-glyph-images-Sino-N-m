@@ -32,7 +32,7 @@ S="--suite render --sample 600 --backend chinese-clip-large --dtype fp16"
 .venv/bin/python evaluate_rerank.py $S --oracle-meta    # trần (chẩn đoán, không phải kết quả)
 .venv/bin/python evaluate_rerank.py $S                  # xếp hạng lại thật
 .venv/bin/python evaluate_rerank.py $S --normalize none # bản trước B2
-.venv/bin/python -m pytest -q                           # 55 test cho rerank/evaluate_rerank
+.venv/bin/python -m pytest -q                           # 66 test cho rerank/evaluate_rerank
 ```
 
 ---

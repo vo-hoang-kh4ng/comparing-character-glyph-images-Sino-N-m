@@ -16,7 +16,7 @@ A university group project ("Image Comparison") for finding visually-similar Sin
 Hán-Nôm) characters by comparing character glyph images. This is not a conventional application —
 it's a set of standalone analysis scripts plus their input data (Excel dictionaries and a corpus of
 character images). There is no build system and no package manifest beyond `requirements.txt`.
-There *is* a test suite — `python -m pytest -q` → 55 passed, pandas only, no torch needed; see the
+There *is* a test suite — `python -m pytest -q` → 66 passed, pandas only, no torch needed; see the
 Tests section below.
 
 Two search modes exist, mirroring how the assignment was handed out:
@@ -453,7 +453,7 @@ the time, while radical carries weight 0.20. With `chinese-clip-ft` as stage 1 i
 
 ### Tests — `test_rerank.py`, `test_evaluate_rerank.py`, `conftest.py`
 
-`python -m pytest -q` → **55 passed**, ~25 s, and it needs **no torch and no GPU** — pandas only.
+`python -m pytest -q` → **66 passed**, ~40 s, and it needs **no torch and no GPU** — pandas only.
 That is a deliberate property of `rerank.py`'s import discipline; do not break it.
 
 The suite is not decorative: it pins each of B1–B4 as a named test (`test_b2_raw_mixing_needs_an_
@@ -734,7 +734,7 @@ Reproduce end to end (~6 minutes total on GPU, embeddings are cached afterwards)
 .venv/bin/python search_all_chars_in_corpus.py --backend dinov2             --device cuda --batch-size 32
 .venv/bin/python benchmark_extractors.py   # defaults to all six
 .venv/bin/python benchmark_search.py       # exact-vs-ANN study, reads the caches
-.venv/bin/python -m pytest -q              # 55 passed, needs neither GPU nor torch
+.venv/bin/python -m pytest -q              # 66 passed, needs neither GPU nor torch
 ```
 
 `benchmark_extractors.py` finds each backend's cache whichever precision it was built at, so the
